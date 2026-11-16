@@ -59,6 +59,7 @@ export class Panel {
           <button class="btn seg-btn" data-option="B">B</button>
           <button class="btn seg-btn" data-option="both">Both</button>
         </div>
+        <button id="p-hide" class="btn toggle">Hide design</button>
         <button id="p-dup" class="btn">Duplicate</button>
         <button id="p-remove" class="btn danger">Remove</button>
       </div>
@@ -85,6 +86,7 @@ export class Panel {
     this.el.querySelectorAll<HTMLButtonElement>('#p-options .seg-btn').forEach((b) => b.addEventListener('click', () => cb.onChange({ option: b.dataset.option as Option }, true)));
     this.opacity.addEventListener('input', () => cb.onChange({ opacity: Number(this.opacity.value) }, false));
     this.opacity.addEventListener('change', () => cb.onChange({ opacity: Number(this.opacity.value) }, true));
+    q('p-hide').addEventListener('click', () => { if (this.current) cb.onChange({ hidden: !this.current.placement.hidden }, true); });
     q('p-dup').addEventListener('click', () => cb.onDuplicate());
     q('p-remove').addEventListener('click', () => cb.onRemove());
   }
@@ -122,6 +124,7 @@ export class Panel {
     this.rotVal.textContent = `${this.rot.value}°`;
     this.el.querySelector('#p-mirror')!.classList.toggle('active', p.mirror);
     this.el.querySelector('#p-wrap')!.classList.toggle('active', p.wrap);
+    this.el.querySelector('#p-hide')!.classList.toggle('active', !!p.hidden);
     this.opacity.value = String(p.opacity);
     this.el.querySelectorAll<HTMLButtonElement>('#p-modes .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === p.mode));
     this.el.querySelectorAll<HTMLButtonElement>('#p-options .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.option === p.option));

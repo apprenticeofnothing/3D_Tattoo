@@ -54,6 +54,7 @@ let scanObject: Object3D | null = null;
 let scanInfo = { triangles: 0, textured: false };
 let orient: { up: UpAxis; turn: number } = { up: 'y', turn: 0 };
 let orientManual = false;
+let lighting: 'studio' | 'flat' | 'auto' = (localStorage.getItem('tattoo.lighting') as 'studio' | 'flat' | 'auto') || 'auto';
 
 function setStatus(text: string) { status.textContent = text; }
 function bodyStatus() { setStatus(`${bodyLabel} · ${heightCm} cm${bodyInfo}`); }
@@ -80,7 +81,9 @@ function showPlaceholder() {
   setStatus('Building placeholder body…');
   setTimeout(() => {
     const { mesh, triangles } = makePlaceholderBody(heightM(), 0.01);
+    scanObject = null;
     viewer.setBody(mesh);
+    applyLighting();
     mesh.updateMatrixWorld(true);
     bodyLabel = 'Placeholder body';
     bodyInfo = ` · ${(triangles / 1000).toFixed(0)}k triangles`;
@@ -135,10 +138,16 @@ function applyScan() {
   // If the automatic upright fix fired, record it so manual turns start from what is on screen.
   if (info.rotatedToYUp && !orientManual) orient = { up: 'z', turn: orient.turn };
   viewer.setBody(group);
+  applyLighting();
   const notes = [scanInfo.textured ? 'textured' : '', info.rotatedToYUp ? 'rotated to upright' : '', orientManual ? `up ${orient.up}, turned ${orient.turn * 90}°` : ''].filter(Boolean);
   bodyInfo = ` · ${(scanInfo.triangles / 1000).toFixed(0)}k triangles${notes.length ? ' · ' + notes.join(' · ') : ''}`;
   afterBodyChange();
   bodyStatus();
+}
+
+function applyLighting() {
+  const mode = lighting === 'auto' ? (scanObject && scanInfo.textured ? 'flat' : 'studio') : lighting;
+  viewer.setLighting(mode);
 }
 
 function changeOrientation(change: (o: { up: UpAxis; turn: number }) => void) {
@@ -212,6 +221,7 @@ function makePlaced(data: PlacementData): PlacedDesign | null {
   if (!entry) return null;
   const placement: Placement = { ...data, design: entry.image };
   const d = new PlacedDesign(placement);
+  d.decal.mesh.visible = !placement.hidden;
   placed.push(d);
   viewer.scene.add(d.decal.mesh);
   return d;
@@ -284,7 +294,7 @@ function select(d: PlacedDesign | null) {
 }
 
 function updateGizmo() {
-  if (!selected || !surface || compare || !selected.result) { gizmo.set(null, null); return; }
+  if (!selected || !surface || compare || !selected.result || selected.placement.hidden) { gizmo.set(null, null); return; }
   gizmo.set(selected.outline(surface), selected.handles(surface));
 }
 
@@ -294,6 +304,7 @@ function changeSelected(patch: Partial<PlacementData>, doCommit: boolean) {
   const p = selected.placement;
   const needsGeometry = ['widthCm', 'rotation', 'mirror', 'wrap'].some((k) => k in patch);
   Object.assign(p, patch);
+  if ('hidden' in patch) { selected.decal.mesh.visible = !p.hidden; updateGizmo(); }
   if ('opacity' in patch) selected.decal.setOpacity(p.opacity);
   if ('mode' in patch) selected.decal.setMode(p.mode);
   if (needsGeometry) recompute(selected, doCommit); else { panel.show(selected); viewer.requestRender(); }
@@ -320,10 +331,18 @@ function updateUndoButtons() {
   ($('btn-redo') as HTMLButtonElement).disabled = !history.canRedo;
 }
 
+let autosaveWarned = false;
+function autosave() {
+  try { localStorage.setItem(PROJECT_KEY, JSON.stringify(projectData())); }
+  catch {
+    if (!autosaveWarned) { autosaveWarned = true; setStatus('Autosave is off: the designs are too large for browser storage. Use More, Save project.'); }
+  }
+}
+
 function commit() {
   history.push(snapshot());
   updateUndoButtons();
-  try { localStorage.setItem(PROJECT_KEY, JSON.stringify(projectData())); } catch { /* storage full or disabled */ }
+  autosave();
 }
 
 /** Rebuild the scene from a placement list (undo/redo). */
@@ -337,6 +356,7 @@ function applySnapshot(list: PlacementData[]) {
     if (d) {
       const changed = JSON.stringify(d.toData()) !== JSON.stringify(data);
       Object.assign(d.placement, data);
+      d.decal.mesh.visible = !data.hidden;
       if (changed) recompute(d, true);
     } else {
       d = makePlaced(data) ?? undefined;
@@ -348,7 +368,7 @@ function applySnapshot(list: PlacementData[]) {
   const sel = selected && placed.includes(selected) ? selected : placed[placed.length - 1] ?? null;
   select(sel);
   updateUndoButtons();
-  try { localStorage.setItem(PROJECT_KEY, JSON.stringify(projectData())); } catch { /* ignore */ }
+  autosave();
 }
 
 function undo() { const s = history.undo(); if (s) { applySnapshot(s); setStatus('Undo'); } }
@@ -443,9 +463,9 @@ function setCompare(on: boolean) {
   $('compare-labels').classList.toggle('stacked', stacked);
   viewer.compareStacked = stacked;
   viewer.compareFilter = on ? (side: CompareSide) => {
-    for (const d of placed) d.decal.mesh.visible = d.placement.option === 'both' || d.placement.option === (side === 'left' ? 'A' : 'B');
+    for (const d of placed) d.decal.mesh.visible = !d.placement.hidden && (d.placement.option === 'both' || d.placement.option === (side === 'left' ? 'A' : 'B'));
   } : null;
-  if (!on) for (const d of placed) d.decal.mesh.visible = true;
+  if (!on) for (const d of placed) d.decal.mesh.visible = !d.placement.hidden;
   updateGizmo();
   viewer.requestRender();
   if (on) setStatus('Compare: left shows A, right shows B. Set each design\'s "Compare as" in its panel.');
@@ -614,6 +634,7 @@ $('btn-more').addEventListener('click', () => moreSheet.open([
   { label: 'Open project', hint: 'A saved .json file', onClick: () => projectInput.click() },
   { label: 'Reset view', onClick: () => viewer.frameBody(heightM()) },
   { label: 'Capture assistant', hint: 'Guided photo session for the scan', onClick: () => { location.href = 'capture.html'; } },
+  { label: `Lighting: ${lighting}`, hint: 'auto = flat for textured scans, studio otherwise', onClick: () => { lighting = lighting === 'auto' ? 'studio' : lighting === 'studio' ? 'flat' : 'auto'; localStorage.setItem('tattoo.lighting', lighting); applyLighting(); setStatus(`Lighting: ${lighting}`); } },
   { label: 'Orientation', hint: 'Stand the scan up, turn it to face you', onClick: () => orientSheet.open([
     { label: 'Turn left 90°', onClick: () => changeOrientation((o) => { o.turn -= 1; }) },
     { label: 'Turn right 90°', onClick: () => changeOrientation((o) => { o.turn += 1; }) },

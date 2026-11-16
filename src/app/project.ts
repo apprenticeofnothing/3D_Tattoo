@@ -26,6 +26,8 @@ export interface PlacementData {
   opacity: number;
   mode: ViewMode;
   option: Option;
+  /** Temporarily hidden (still saved). */
+  hidden?: boolean;
 }
 
 export interface ProjectData {

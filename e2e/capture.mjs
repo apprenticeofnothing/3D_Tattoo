@@ -1,0 +1,35 @@
+import pw from 'playwright';
+import fs from 'node:fs';
+const { chromium, devices } = pw;
+const out = process.argv[2];
+const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--use-angle=swiftshader'] });
+const ctx = await browser.newContext({ ...devices['iPhone 15'], deviceScaleFactor: 1, hasTouch: true, acceptDownloads: true, permissions: ['camera'] });
+const page = await ctx.newPage();
+const logs = [];
+page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`));
+page.on('console', (m) => { if (m.type() === 'error') logs.push(`error: ${m.text()}`); });
+await page.goto('http://localhost:4173/capture.html', { waitUntil: 'networkidle' });
+await page.screenshot({ path: `${out}/cap-intro.png` });
+await page.tap('#start');
+await page.waitForSelector('#hud:not(.hidden)', { timeout: 15000 });
+await page.waitForTimeout(1500);
+logs.push(`res: ${await page.textContent('#res')}, sharp: ${await page.textContent('#sharp')}`);
+await page.evaluate(() => window.__cap.setHeading(42));
+await page.tap('#shoot'); await page.waitForTimeout(600);
+await page.evaluate(() => window.__cap.setHeading(60));
+await page.tap('#shoot'); await page.waitForTimeout(600);
+await page.tap('#next'); await page.evaluate(() => window.__cap.setHeading(200));
+await page.tap('#shoot'); await page.waitForTimeout(600);
+logs.push(`count: ${await page.textContent('#count')}`);
+await page.screenshot({ path: `${out}/cap-hud.png` });
+const downloads = [];
+page.on('download', (d) => downloads.push(d));
+await page.tap('#export');
+await page.waitForTimeout(3000);
+for (const d of downloads) { const p = `${out}/${d.suggestedFilename()}`; await d.saveAs(p); logs.push(`download: ${d.suggestedFilename()} ${fs.statSync(p).size} bytes`); }
+// reload keeps shots (IndexedDB)
+await page.reload({ waitUntil: 'networkidle' });
+await page.tap('#start'); await page.waitForSelector('#hud:not(.hidden)', { timeout: 15000 }); await page.waitForTimeout(800);
+logs.push(`after reload: ${await page.textContent('#count')}`);
+await browser.close();
+console.log(logs.join('\n'));

@@ -26,6 +26,21 @@ export class Viewer {
   private fly: { from: FlyTarget; to: FlyTarget; start: number; duration: number } | null = null;
   private readonly floor: GridHelper;
   private width = 1; private height = 1;
+  private hemi!: HemisphereLight; private key!: DirectionalLight; private fill!: DirectionalLight; private ambient!: AmbientLight;
+
+  /**
+   * 'studio': directional lights that show the shape (placeholder, untextured scans).
+   * 'flat': almost no directional light, for photogrammetry textures that already
+   * contain the lighting of the room they were shot in.
+   */
+  setLighting(mode: 'studio' | 'flat'): void {
+    const flat = mode === 'flat';
+    this.hemi.intensity = flat ? 2.6 : 1.6;
+    this.key.intensity = flat ? 0.35 : 1.6;
+    this.fill.intensity = flat ? 0.2 : 0.7;
+    this.ambient.intensity = flat ? 0.9 : 0.25;
+    this.needsRender = true;
+  }
 
   constructor(readonly container: HTMLElement) {
     this.renderer = new WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -46,12 +61,13 @@ export class Viewer {
     this.controls.target.set(0, 1.0, 0);
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
-    const hemi = new HemisphereLight(0xffffff, 0x6b7280, 1.6);
-    const key = new DirectionalLight(0xffffff, 1.6);
-    key.position.set(1.5, 3, 2.5);
-    const fill = new DirectionalLight(0xdfe8ff, 0.7);
-    fill.position.set(-2, 1.5, -1.5);
-    this.scene.add(hemi, key, fill, new AmbientLight(0xffffff, 0.25));
+    this.hemi = new HemisphereLight(0xffffff, 0x6b7280, 1.6);
+    this.key = new DirectionalLight(0xffffff, 1.6);
+    this.key.position.set(1.5, 3, 2.5);
+    this.fill = new DirectionalLight(0xdfe8ff, 0.7);
+    this.fill.position.set(-2, 1.5, -1.5);
+    this.ambient = new AmbientLight(0xffffff, 0.25);
+    this.scene.add(this.hemi, this.key, this.fill, this.ambient);
 
     this.floor = new GridHelper(4, 16, 0x3a3f4a, 0x2a2e36);
     this.scene.add(this.floor);
