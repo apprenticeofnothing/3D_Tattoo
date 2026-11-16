@@ -8,9 +8,14 @@ I am the only user. I will use this to make real, permanent decisions,
 so placement, size and shape fidelity matter more than feature count.
 
 ## My setup
-(To be filled in from my answers: height, phone, computer, existing scan.)
-I mostly work from my phone, so the app must work well in a phone
-browser with touch, and also on desktop.
+- Height: 193 cm.
+- Phone: iPhone 16 (no LiDAR). Used for photo capture and for directing
+  development; occasional testing in the phone browser.
+- Computer: MacBook Pro. This is where I will primarily use the app.
+- Existing 3D body scan: none yet; it has to be produced in phase 1.
+I direct development from my phone, but I will primarily use the app on
+my MacBook Pro. The app must work well in a desktop browser first, and
+also in a phone browser with touch.
 
 ## Privacy
 The source material is photos of my body. Body photos and meshes are
