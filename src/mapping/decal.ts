@@ -48,7 +48,8 @@ const fragmentShader = /* glsl */ `
     if (mode == 2) {
       gl_FragColor = vec4(vHeat, 0.9);
     } else {
-      vec4 c = texture2D(map, st);
+      // Inked skin: sample a slightly blurred level so edges soften like real ink.
+      vec4 c = mode == 1 ? texture2D(map, st, 1.0) : texture2D(map, st);
       if (mode == 1) {
         // Ink sits in the skin: multiply blend, slightly lower contrast.
         vec3 ink = mix(vec3(1.0), c.rgb * 0.85 + 0.05, c.a * opacity);

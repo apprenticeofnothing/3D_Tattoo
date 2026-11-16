@@ -36,8 +36,14 @@ both devices are on the same Wi-Fi.
   size in real centimetres along the skin, rotate, mirror, wrap around a
   limb, stencil / inked / heatmap views, stretch report with a 5% warning,
   circumference readout. Verified on analytic shapes (see `tests/`).
-- Next: phase 3, placement interaction (drag, multiple designs, undo,
-  save and load, screenshots, side-by-side).
+- Phase 3 done: direct manipulation. Drag a design along the skin, rotate
+  and scale with on-skin handles (or the panel), several designs with
+  chips to switch, duplicate, undo/redo (Ctrl+Z / Ctrl+Shift+Z), save and
+  open a project file (designs embedded, no body data), autosave of the
+  last session in the browser, PNG photo export (share sheet on iPhone),
+  and a split A/B compare view.
+- Next: phase 4, reconstruction from photos (capture assistant page, Mac
+  script around Apple's photogrammetry engine, mesh prep).
 
 ## How the mapping works
 

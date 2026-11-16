@@ -38,6 +38,11 @@ export class PatchLocator {
 
   /** 3D point for a design-plane coordinate, or null if outside the patch. */
   locate(u: number, v: number): [number, number, number] | null {
+    return this.locateTri(u, v)?.point ?? null;
+  }
+
+  /** 3D point and the triangle it lies in, or null if outside the patch. */
+  locateTri(u: number, v: number): { point: [number, number, number]; tri: number } | null {
     const list = this.buckets[this.iy(v) * this.nx + this.ix(u)];
     const I = this.mesh.indices, P = this.mesh.positions, uv = this.patch.uv, local = this.patch.local;
     for (let n = 0; n < list.length; n++) {
@@ -52,11 +57,11 @@ export class PatchLocator {
       const eps = -1e-6;
       if (l1 < eps || l2 < eps || l3 < eps) continue;
       const ga = I[t * 3] * 3, gb = I[t * 3 + 1] * 3, gc = I[t * 3 + 2] * 3;
-      return [
+      return { tri: t, point: [
         l1 * P[ga] + l2 * P[gb] + l3 * P[gc],
         l1 * P[ga + 1] + l2 * P[gb + 1] + l3 * P[gc + 1],
         l1 * P[ga + 2] + l2 * P[gb + 2] + l3 * P[gc + 2],
-      ];
+      ] };
     }
     return null;
   }

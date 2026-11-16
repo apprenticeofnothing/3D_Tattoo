@@ -1,57 +1,71 @@
 import './style.css';
-import { Mesh, Raycaster, Vector2 } from 'three';
+import { Mesh, Raycaster, Vector2, Vector3 } from 'three';
 import { fitToHeight } from './body/fit';
 import { makePlaceholderBody } from './body/placeholder';
-import { locateRegion, type RegionDef } from './body/regions';
+import { locateRegion, REGIONS, type RegionDef } from './body/regions';
 import { loadBodyFiles } from './io/loadMesh';
 import { createPicker } from './ui/picker';
-import { Viewer } from './viewer/Viewer';
+import { createSheet } from './ui/sheet';
+import { Panel } from './ui/panel';
+import { attachGestures, type DragKind } from './ui/gestures';
+import { Viewer, type CompareSide } from './viewer/Viewer';
+import { SelectionGizmo } from './viewer/SelectionGizmo';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
-import { loadDesignFile, rasterizeSvg, type DesignImage } from './design/raster';
-import { TEST_PATTERN_WIDTH_CM, testPatternSvg } from './design/testPattern';
-import { PlacedDesign, type Placement } from './mapping/placements';
-import type { DecalMode } from './mapping/decal';
+import { DesignStore, type DesignEntry } from './app/designs';
+import { History, newId, type PlacementData, type ProjectData } from './app/project';
+import { PlacedDesign, nearestTriangle, type Placement } from './mapping/placements';
 
 const HEIGHT_KEY = 'tattoo.heightCm';
+const PROJECT_KEY = 'tattoo.project.v1';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const app = $('app'), stage = $('stage'), status = $('status'), hint = $('hint'), panel = $('panel');
-const heightInput = $<HTMLInputElement>('height');
+const app = $('app'), stage = $('stage'), status = $('status'), hint = $('hint');
 const fileInput = $<HTMLInputElement>('file');
 const designInput = $<HTMLInputElement>('design-file');
+const projectInput = $<HTMLInputElement>('project-file');
 
-heightInput.value = localStorage.getItem(HEIGHT_KEY) ?? '193';
-const heightM = () => Math.max(0.5, Math.min(2.5, (Number(heightInput.value) || 193) / 100));
+let heightCm = Math.max(50, Math.min(250, Number(localStorage.getItem(HEIGHT_KEY)) || 193));
+const heightM = () => heightCm / 100;
 
 const viewer = new Viewer(stage);
+const gizmo = new SelectionGizmo();
+viewer.scene.add(gizmo.group);
+const designs = new DesignStore();
+const history = new History();
 let surface: SurfaceMesh | null = null;
 let bodyLabel = 'Placeholder body';
 let bodyInfo = '';
+let bodyTriangles = 0;
 const placed: PlacedDesign[] = [];
 let selected: PlacedDesign | null = null;
-let pendingDesign: DesignImage | null = null; // waiting for a tap
-let moving: PlacedDesign | null = null; // re-anchoring an existing design
-let testDesign: DesignImage | null = null;
+let pending: DesignEntry | null = null; // design waiting for a tap
+let restorePending: ProjectData | null = null;
+let compare = false;
 
 function setStatus(text: string) { status.textContent = text; }
-function bodyStatus() { setStatus(`${bodyLabel} · ${Math.round(heightM() * 100)} cm${bodyInfo}`); }
+function bodyStatus() { setStatus(`${bodyLabel} · ${heightCm} cm${bodyInfo}`); }
+
+// ---------- Body ----------
+
+function clearPlacements() {
+  for (const d of placed) { viewer.scene.remove(d.decal.mesh); d.dispose(); }
+  placed.length = 0;
+  select(null);
+}
 
 function afterBodyChange() {
   const body = viewer.getBody()!;
-  const t0 = performance.now();
   surface = surfaceFromObject(body);
-  console.log(`surface: ${surface.positions.length / 3} verts, ${surface.indices.length / 3} tris in ${(performance.now() - t0).toFixed(0)} ms`);
-  // Existing designs no longer match this body.
-  for (const d of placed) { viewer.scene.remove(d.decal.mesh); d.dispose(); }
-  placed.length = 0; selected = null; moving = null;
-  showPanel(null);
+  bodyTriangles = surface.indices.length / 3;
+  clearPlacements();
   viewer.frameBody(heightM());
+  if (restorePending) { const data = restorePending; restorePending = null; void applyProject(data); }
+  else commit();
 }
 
 function showPlaceholder() {
   setStatus('Building placeholder body…');
   setTimeout(() => {
-    const h = heightM();
-    const { mesh, triangles } = makePlaceholderBody(h, 0.01);
+    const { mesh, triangles } = makePlaceholderBody(heightM(), 0.01);
     viewer.setBody(mesh);
     mesh.updateMatrixWorld(true);
     bodyLabel = 'Placeholder body';
@@ -78,6 +92,20 @@ async function loadFiles(files: File[]) {
   }
 }
 
+function setHeight(cm: number) {
+  heightCm = Math.max(50, Math.min(250, Math.round(cm)));
+  localStorage.setItem(HEIGHT_KEY, String(heightCm));
+  const body = viewer.getBody();
+  if (!body) return;
+  // Keep the placements: they are re-applied by location after the body is rebuilt.
+  restorePending = projectData();
+  if ((body as Mesh).name === 'placeholder-body') showPlaceholder();
+  else {
+    const inner = body.children[0];
+    if (inner) { body.remove(inner); const { group } = fitToHeight(inner, heightM()); viewer.setBody(group); afterBodyChange(); bodyStatus(); }
+  }
+}
+
 function goTo(def: RegionDef) {
   if (!surface) return;
   const pose = locateRegion(def, surface.positions, heightM());
@@ -86,207 +114,453 @@ function goTo(def: RegionDef) {
   setStatus(def.label);
 }
 
-// ---------- Designs ----------
-
-async function getTestDesign(): Promise<DesignImage> {
-  if (!testDesign) testDesign = await rasterizeSvg(testPatternSvg(), 'test-pattern.svg');
-  return testDesign;
-}
-
-function startPlacing(design: DesignImage) {
-  pendingDesign = design; moving = null;
-  hint.textContent = `Tap the body where the centre of "${design.name}" should go`;
-  hint.classList.remove('hidden');
-}
-
-function startMoving(d: PlacedDesign) {
-  moving = d; pendingDesign = null;
-  hint.textContent = 'Tap the new centre point';
-  hint.classList.remove('hidden');
-}
+// ---------- Picking ----------
 
 const raycaster = new Raycaster();
+function ndcAt(clientX: number, clientY: number): Vector2 {
+  const rect = viewer.renderer.domElement.getBoundingClientRect();
+  return new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+}
 function pickSurface(clientX: number, clientY: number): { tri: number; point: [number, number, number] } | null {
   if (!surface) return null;
-  const rect = viewer.renderer.domElement.getBoundingClientRect();
-  const ndc = new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-  raycaster.setFromCamera(ndc, viewer.camera);
+  raycaster.setFromCamera(ndcAt(clientX, clientY), viewer.camera);
   const hits = raycaster.intersectObjects(viewer.bodyMeshes(), false);
   const hit = hits.find((h) => h.faceIndex !== undefined && h.faceIndex !== null);
   if (!hit) return null;
-  return { tri: triangleForHit(surface, hit.object as Mesh, hit.faceIndex!), point: [hit.point.x, hit.point.y, hit.point.z] };
+  try {
+    return { tri: triangleForHit(surface, hit.object as Mesh, hit.faceIndex!), point: [hit.point.x, hit.point.y, hit.point.z] };
+  } catch { return null; }
 }
-
-function placeAt(clientX: number, clientY: number): boolean {
-  const hit = pickSurface(clientX, clientY);
-  if (!hit) { setStatus('That tap missed the body. Try again.'); return false; }
-  hint.classList.add('hidden');
-  if (moving) {
-    moving.placement.tri = hit.tri; moving.placement.point = hit.point;
-    const d = moving; moving = null;
-    recompute(d);
-    return true;
+function pickDesign(clientX: number, clientY: number): PlacedDesign | null {
+  raycaster.setFromCamera(ndcAt(clientX, clientY), viewer.camera);
+  const meshes = placed.filter((d) => d.decal.mesh.visible).map((d) => d.decal.mesh);
+  const hits = raycaster.intersectObjects(meshes, false);
+  for (const h of hits) {
+    const d = placed.find((x) => x.decal.mesh === h.object);
+    if (!d || !h.uv) continue;
+    const inV = h.uv.y >= 0 && h.uv.y <= 1;
+    const inU = d.placement.wrap || (h.uv.x >= 0 && h.uv.x <= 1);
+    if (inV && inU) return d;
   }
-  if (!pendingDesign) return false;
-  const design = pendingDesign; pendingDesign = null;
-  const widthCm = design.declaredWidthCm ?? (design === testDesign ? TEST_PATTERN_WIDTH_CM : 10);
-  const placement: Placement = { id: `d${Date.now()}`, design, tri: hit.tri, point: hit.point, rotation: 0, widthCm, mirror: false, wrap: false, opacity: 1 };
-  const pd = new PlacedDesign(placement);
-  placed.push(pd);
-  viewer.scene.add(pd.decal.mesh);
-  select(pd);
-  recompute(pd);
-  return true;
+  return null;
+}
+function toScreen(p: [number, number, number]): { x: number; y: number } {
+  const rect = viewer.renderer.domElement.getBoundingClientRect();
+  const v = new Vector3(...p).project(viewer.camera);
+  return { x: rect.left + ((v.x + 1) / 2) * rect.width, y: rect.top + ((1 - v.y) / 2) * rect.height };
 }
 
-let busy = false, again = false;
-function recompute(d: PlacedDesign) {
+// ---------- Placements ----------
+
+function makePlaced(data: PlacementData): PlacedDesign | null {
+  const entry = designs.get(data.designId);
+  if (!entry) return null;
+  const placement: Placement = { ...data, design: entry.image };
+  const d = new PlacedDesign(placement);
+  placed.push(d);
+  viewer.scene.add(d.decal.mesh);
+  return d;
+}
+
+function place(entry: DesignEntry, tri: number, point: [number, number, number]): PlacedDesign | null {
+  const data: PlacementData = {
+    id: newId('p'), designId: entry.source.id, tri, point, normal: [0, 0, 1], rotation: 0,
+    widthCm: entry.defaultWidthCm, mirror: false, wrap: false, opacity: 1, mode: 'stencil', option: 'both',
+  };
+  const d = makePlaced(data);
+  if (!d) return null;
+  select(d);
+  recompute(d, true);
+  commit();
+  return d;
+}
+
+function removeDesign(d: PlacedDesign) {
+  viewer.scene.remove(d.decal.mesh); d.dispose();
+  placed.splice(placed.indexOf(d), 1);
+  if (selected === d) select(placed[placed.length - 1] ?? null); else panel.setDesigns(placed, selected?.placement.id ?? null);
+  viewer.requestRender();
+  commit();
+}
+
+function duplicateSelected() {
+  if (!selected) return;
+  const data = selected.toData();
+  data.id = newId('p');
+  const d = makePlaced(data);
+  if (!d) return;
+  select(d);
+  recompute(d, true);
+  commit();
+  setStatus('Duplicated. Drag the copy to where you want it.');
+}
+
+const busy = new Map<PlacedDesign, { again: boolean; exact: boolean }>();
+function recompute(d: PlacedDesign, exact: boolean) {
   if (!surface) return;
-  if (busy) { again = true; return; }
-  busy = true;
+  const b = busy.get(d);
+  if (b) { b.again = true; b.exact = b.exact || exact; return; }
+  busy.set(d, { again: false, exact });
   requestAnimationFrame(() => {
+    const state = busy.get(d)!;
     try {
-      const r = d.update(surface!);
-      d.setMode(d.mode);
-      viewer.requestRender();
-      if (d === selected) renderReadout(d);
-      console.log(`placement computed in ${r.computeMs.toFixed(0)} ms, ${r.patch.tris.length} tris`);
+      if (placed.includes(d)) {
+        d.update(surface!, state.exact);
+        if (d === selected) { panel.renderReadout(d); updateGizmo(); }
+        viewer.requestRender();
+      }
     } catch (err) {
       console.error(err);
       setStatus(`Mapping failed: ${(err as Error).message}`);
     } finally {
-      busy = false;
-      if (again) { again = false; recompute(d); }
+      busy.delete(d);
+      if (state.again) recompute(d, state.exact);
     }
   });
 }
-
-function removeSelected() {
-  if (!selected) return;
-  const d = selected;
-  viewer.scene.remove(d.decal.mesh); d.dispose();
-  placed.splice(placed.indexOf(d), 1);
-  select(placed[placed.length - 1] ?? null);
-  viewer.requestRender();
-}
-
-// ---------- Panel ----------
-const pWidth = $<HTMLInputElement>('p-width'), pHeight = $('p-height'), pRot = $<HTMLInputElement>('p-rot'), pRotVal = $('p-rot-val');
-const pMirror = $<HTMLButtonElement>('p-mirror'), pWrap = $<HTMLButtonElement>('p-wrap'), pOpacity = $<HTMLInputElement>('p-opacity');
-const pReadout = $('p-readout');
+const anyBusy = () => busy.size > 0;
 
 function select(d: PlacedDesign | null) {
   selected = d;
-  showPanel(d);
+  panel.show(d);
+  panel.setDesigns(placed, d?.placement.id ?? null);
+  updateGizmo();
+  viewer.requestRender();
 }
 
-function showPanel(d: PlacedDesign | null) {
-  if (!d) { panel.classList.add('hidden'); return; }
-  panel.classList.remove('hidden');
-  const p = d.placement;
-  $('p-name').textContent = p.design.name;
-  pWidth.value = String(p.widthCm);
-  pRot.value = String(Math.round((p.rotation * 180) / Math.PI));
-  pRotVal.textContent = `${pRot.value}°`;
-  pMirror.classList.toggle('active', p.mirror);
-  pWrap.classList.toggle('active', p.wrap);
-  pOpacity.value = String(p.opacity);
-  panel.querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === d.mode));
-  renderReadout(d);
+function updateGizmo() {
+  if (!selected || !surface || compare || !selected.result) { gizmo.set(null, null); return; }
+  gizmo.set(selected.outline(surface), selected.handles(surface));
 }
 
-function renderReadout(d: PlacedDesign) {
-  const r = d.result;
-  const p = d.placement;
-  if (!r) { pReadout.textContent = 'Computing…'; return; }
-  pHeight.textContent = `× ${r.heightCm.toFixed(1)} cm`;
-  const s = r.summary;
-  const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
-  const worst = Math.max(s.worstStretch, -s.worstCompression);
-  const cls = worst > 0.05 ? 'warn' : 'ok';
-  const parts = [
-    `<b>${p.design.name}</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin`,
-    `<span class="${cls}">Stretch up to ${pct(s.worstStretch)}, compression up to ${pct(-s.worstCompression)}; ${pct(s.areaOverThreshold)} of the design beyond 5%</span>`,
-  ];
-  if (worst > 0.05) parts.push(`<span class="warn">A paper stencil would ${s.worstCompression < -0.05 ? 'wrinkle' : 'tear'} there. Consider a smaller design or a flatter spot.</span>`);
-  if (r.circumferenceM !== null) parts.push(`Circumference here: <b>${(r.circumferenceM * 100).toFixed(1)} cm</b> (set width to this, or a fraction of it, for a seamless band)`);
-  if (d.mode === 'heatmap') parts.push(`<span class="legend"><i style="background:#1a59f2"></i> compression (wrinkle) <i style="background:#ededed"></i> under 2% <i style="background:#d9261a"></i> stretch (tear); strong colour above 5%</span>`);
-  parts.push(`<span class="muted">${r.patch.tris.length} triangles, ${(r.patch.exactCoverage * 100).toFixed(0)}% exact, ${r.computeMs.toFixed(0)} ms</span>`);
-  pReadout.innerHTML = parts.join('<br>');
-  $('p-summary').innerHTML = `${p.widthCm} × ${r.heightCm.toFixed(1)} cm · <span class="${cls}">max ${pct(worst)}</span>`;
-}
-
-// On a phone the panel starts folded so the body stays visible.
-if (window.innerWidth < 700) { panel.classList.add('collapsed'); $('p-collapse').textContent = 'Show'; }
-
-pWidth.addEventListener('change', () => { if (!selected) return; selected.placement.widthCm = Math.max(1, Number(pWidth.value) || 10); recompute(selected); });
-pRot.addEventListener('input', () => { if (!selected) return; pRotVal.textContent = `${pRot.value}°`; selected.placement.rotation = (Number(pRot.value) * Math.PI) / 180; recompute(selected); });
-pMirror.addEventListener('click', () => { if (!selected) return; selected.placement.mirror = !selected.placement.mirror; pMirror.classList.toggle('active', selected.placement.mirror); recompute(selected); });
-pWrap.addEventListener('click', () => { if (!selected) return; selected.placement.wrap = !selected.placement.wrap; pWrap.classList.toggle('active', selected.placement.wrap); recompute(selected); });
-pOpacity.addEventListener('input', () => { if (!selected) return; selected.placement.opacity = Number(pOpacity.value); selected.decal.setOpacity(selected.placement.opacity); viewer.requestRender(); });
-panel.querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => b.addEventListener('click', () => {
+/** Apply a field change to the selected design. */
+function changeSelected(patch: Partial<PlacementData>, doCommit: boolean) {
   if (!selected) return;
-  selected.setMode(b.dataset.mode as DecalMode);
-  panel.querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
-  renderReadout(selected); viewer.requestRender();
-}));
-$('p-move').addEventListener('click', () => { if (selected) startMoving(selected); });
-$('p-collapse').addEventListener('click', () => { const c = panel.classList.toggle('collapsed'); $('p-collapse').textContent = c ? 'Show' : 'Hide'; });
-$('p-remove').addEventListener('click', removeSelected);
+  const p = selected.placement;
+  const needsGeometry = ['widthCm', 'rotation', 'mirror', 'wrap'].some((k) => k in patch);
+  Object.assign(p, patch);
+  if ('opacity' in patch) selected.decal.setOpacity(p.opacity);
+  if ('mode' in patch) selected.decal.setMode(p.mode);
+  if (needsGeometry) recompute(selected, doCommit); else { panel.show(selected); viewer.requestRender(); }
+  if (!needsGeometry) panel.renderReadout(selected);
+  if (doCommit) { panel.show(selected); commit(); }
+}
 
-// ---------- Tap detection on the canvas ----------
-let down: { x: number; y: number; t: number; id: number } | null = null;
-const canvas = viewer.renderer.domElement;
-canvas.addEventListener('pointerdown', (e) => { if (e.isPrimary) down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId }; });
-canvas.addEventListener('pointerup', (e) => {
-  if (!down || e.pointerId !== down.id) return;
-  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
-  const dt = performance.now() - down.t;
-  down = null;
-  if (moved < 8 && dt < 600 && (pendingDesign || moving)) placeAt(e.clientX, e.clientY);
+// ---------- History and persistence ----------
+
+function snapshot(): PlacementData[] { return placed.map((d) => d.toData()); }
+
+function projectData(): ProjectData {
+  const used = new Set(placed.map((d) => d.placement.designId));
+  return {
+    version: 1, savedAt: new Date().toISOString(), heightCm,
+    body: { label: bodyLabel, triangles: bodyTriangles },
+    designs: [...designs.entries.values()].filter((e) => used.has(e.source.id)).map((e) => e.source),
+    placements: snapshot(), selectedId: selected?.placement.id ?? null,
+  };
+}
+
+function updateUndoButtons() {
+  ($('btn-undo') as HTMLButtonElement).disabled = !history.canUndo;
+  ($('btn-redo') as HTMLButtonElement).disabled = !history.canRedo;
+}
+
+function commit() {
+  history.push(snapshot());
+  updateUndoButtons();
+  try { localStorage.setItem(PROJECT_KEY, JSON.stringify(projectData())); } catch { /* storage full or disabled */ }
+}
+
+/** Rebuild the scene from a placement list (undo/redo). */
+function applySnapshot(list: PlacementData[]) {
+  const keepIds = new Set(list.map((p) => p.id));
+  for (const d of [...placed]) if (!keepIds.has(d.placement.id)) { viewer.scene.remove(d.decal.mesh); d.dispose(); placed.splice(placed.indexOf(d), 1); }
+  const byId = new Map(placed.map((d) => [d.placement.id, d]));
+  const order: PlacedDesign[] = [];
+  for (const data of list) {
+    let d = byId.get(data.id);
+    if (d) {
+      const changed = JSON.stringify(d.toData()) !== JSON.stringify(data);
+      Object.assign(d.placement, data);
+      if (changed) recompute(d, true);
+    } else {
+      d = makePlaced(data) ?? undefined;
+      if (d) recompute(d, true);
+    }
+    if (d) order.push(d);
+  }
+  placed.length = 0; placed.push(...order);
+  const sel = selected && placed.includes(selected) ? selected : placed[placed.length - 1] ?? null;
+  select(sel);
+  updateUndoButtons();
+  try { localStorage.setItem(PROJECT_KEY, JSON.stringify(projectData())); } catch { /* ignore */ }
+}
+
+function undo() { const s = history.undo(); if (s) { applySnapshot(s); setStatus('Undo'); } }
+function redo() { const s = history.redo(); if (s) { applySnapshot(s); setStatus('Redo'); } }
+
+/** Restore designs and placements from a saved project onto the current body. */
+async function applyProject(data: ProjectData) {
+  if (!surface) return;
+  try {
+    for (const src of data.designs) await designs.addSource(src);
+  } catch (err) {
+    setStatus(`Could not restore a design: ${(err as Error).message}`);
+  }
+  const sameBody = data.body.triangles === bodyTriangles;
+  let refitted = 0;
+  for (const p of data.placements) {
+    if (!designs.get(p.designId)) continue;
+    // Validate the anchor triangle; fall back to the nearest triangle to the saved point.
+    let ok = sameBody && p.tri >= 0 && p.tri < bodyTriangles;
+    if (ok) {
+      const I = surface.indices, P = surface.positions;
+      const a = I[p.tri * 3] * 3, b = I[p.tri * 3 + 1] * 3, c = I[p.tri * 3 + 2] * 3;
+      const cx = (P[a] + P[b] + P[c]) / 3, cy = (P[a + 1] + P[b + 1] + P[c + 1]) / 3, cz = (P[a + 2] + P[b + 2] + P[c + 2]) / 3;
+      ok = Math.hypot(cx - p.point[0], cy - p.point[1], cz - p.point[2]) < 0.03;
+    }
+    if (!ok) {
+      const n = nearestTriangle(surface, p.point);
+      if (n.dist > 0.05) continue; // nowhere near this body
+      p.tri = n.tri; refitted++;
+    }
+    const d = makePlaced(p);
+    if (d) recompute(d, true);
+  }
+  const sel = placed.find((d) => d.placement.id === data.selectedId) ?? placed[placed.length - 1] ?? null;
+  select(sel);
+  commit();
+  if (placed.length) setStatus(`Restored ${placed.length} design${placed.length === 1 ? '' : 's'}${refitted ? ` (${refitted} re-fitted by location)` : ''}`);
+}
+
+function download(blob: Blob, filename: string) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '').replace(/(\d{8})(\d{4})/, '$1-$2');
+
+function saveProject() {
+  const data = projectData();
+  download(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), `tattoo-project-${stamp()}.json`);
+  setStatus('Project saved (designs and placements, no body data)');
+}
+
+async function openProject(file: File) {
+  try {
+    const data = JSON.parse(await file.text()) as ProjectData;
+    if (data.version !== 1 || !Array.isArray(data.placements)) throw new Error('not a tattoo project file');
+    clearPlacements();
+    if (data.heightCm && data.heightCm !== heightCm) { restorePending = data; setHeight(data.heightCm); }
+    else await applyProject(data);
+  } catch (err) {
+    setStatus(`Could not open project: ${(err as Error).message}`);
+  }
+}
+
+async function takePhoto() {
+  try {
+    // Hide the selection outline and handles for a clean image.
+    const wasVisible = gizmo.group.visible;
+    gizmo.group.visible = false;
+    let blob: Blob;
+    try { blob = await viewer.screenshot(); } finally { gizmo.group.visible = wasVisible; viewer.requestRender(); }
+    const file = new File([blob], `tattoo-${stamp()}.png`, { type: 'image/png' });
+    const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
+    if (nav.share && nav.canShare?.({ files: [file] })) {
+      try { await nav.share({ files: [file], title: 'Tattoo preview' }); setStatus('Photo shared'); return; } catch { /* user cancelled: fall through to download */ }
+    }
+    download(blob, file.name);
+    setStatus('Photo saved');
+  } catch (err) {
+    setStatus(`Could not take photo: ${(err as Error).message}`);
+  }
+}
+
+// ---------- Compare ----------
+
+function setCompare(on: boolean) {
+  compare = on;
+  $('btn-compare').classList.toggle('active', on);
+  $('compare-labels').classList.toggle('hidden', !on);
+  const stacked = window.innerWidth < window.innerHeight;
+  $('compare-labels').classList.toggle('stacked', stacked);
+  viewer.compareStacked = stacked;
+  viewer.compareFilter = on ? (side: CompareSide) => {
+    for (const d of placed) d.decal.mesh.visible = d.placement.option === 'both' || d.placement.option === (side === 'left' ? 'A' : 'B');
+  } : null;
+  if (!on) for (const d of placed) d.decal.mesh.visible = true;
+  updateGizmo();
+  viewer.requestRender();
+  if (on) setStatus('Compare: left shows A, right shows B. Set each design\'s "Compare as" in its panel.');
+}
+
+// ---------- Gestures ----------
+
+type Drag = { kind: DragKind; offset: { dx: number; dy: number } };
+let drag: Drag | null = null;
+const HANDLE_RADIUS = 30;
+
+function nearHandle(x: number, y: number, p: [number, number, number] | null): boolean {
+  if (!p) return false;
+  const s = toScreen(p);
+  return Math.hypot(s.x - x, s.y - y) < HANDLE_RADIUS;
+}
+
+attachGestures(viewer.renderer.domElement, viewer.controls, {
+  hitTest(x, y) {
+    if (compare || !surface) return null;
+    if (selected?.result) {
+      const h = selected.handles(surface);
+      if (nearHandle(x, y, h.rotate)) return 'rotate';
+      if (nearHandle(x, y, h.scale)) return 'scale';
+    }
+    if (pending) return null; // placing: let taps through, camera otherwise
+    const d = pickDesign(x, y);
+    if (d) { if (d !== selected) select(d); return 'move'; }
+    return null;
+  },
+  onTap(x, y) {
+    if (pending) {
+      const hit = pickSurface(x, y);
+      if (!hit) { setStatus('That tap missed the body. Try again.'); return; }
+      const entry = pending; pending = null; hint.classList.add('hidden');
+      place(entry, hit.tri, hit.point);
+      return;
+    }
+    const d = pickDesign(x, y);
+    if (d) select(d); else if (selected) select(null);
+  },
+  onDragStart(kind, x, y) {
+    if (!selected || !surface) return;
+    let offset = { dx: 0, dy: 0 };
+    if (kind === 'move') {
+      const c = toScreen(selected.placement.point);
+      offset = { dx: c.x - x, dy: c.y - y };
+    }
+    drag = { kind, offset };
+  },
+  onDragMove(kind, x, y) {
+    if (!selected || !surface || !drag) return;
+    const p = selected.placement;
+    if (kind === 'move') {
+      const hit = pickSurface(x + drag.offset.dx, y + drag.offset.dy);
+      if (!hit) return;
+      p.tri = hit.tri; p.point = hit.point;
+      recompute(selected, false);
+      return;
+    }
+    const hit = pickSurface(x, y);
+    if (!hit || !selected.result || selected.result.rotation !== p.rotation) return; // wait for a fresh patch
+    const uv = selected.uvAt(surface, hit.tri, hit.point);
+    if (!uv) return;
+    if (kind === 'rotate') {
+      const phi = Math.atan2(uv[0], uv[1]); // angle of the finger from the design's up axis
+      let r = p.rotation - phi;
+      r = Math.atan2(Math.sin(r), Math.cos(r));
+      p.rotation = r;
+    } else {
+      p.widthCm = Math.round(Math.min(150, Math.max(1, selected.widthForCornerRadius(Math.hypot(uv[0], uv[1])))) * 10) / 10;
+    }
+    panel.show(selected);
+    recompute(selected, false);
+  },
+  onDragEnd(_kind, cancelled) {
+    drag = null;
+    if (!selected) return;
+    recompute(selected, true);
+    if (!cancelled) commit();
+    panel.show(selected);
+  },
 });
-canvas.addEventListener('pointercancel', () => { down = null; });
+viewer.controls.addEventListener('change', () => { /* handles are sprites; nothing to do */ });
 
-// ---------- Toolbar ----------
+// ---------- UI wiring ----------
+
+const panel = new Panel(stage, {
+  onSelect: (id) => select(placed.find((d) => d.placement.id === id) ?? null),
+  onChange: changeSelected,
+  onDuplicate: duplicateSelected,
+  onRemove: () => { if (selected) removeDesign(selected); },
+});
+if (window.innerWidth < 700) panel.setCollapsed(true);
+
+function startPlacing(entry: DesignEntry) {
+  pending = entry;
+  hint.textContent = `Tap the body where the centre of "${entry.source.name}" should go`;
+  hint.classList.remove('hidden');
+  if (selected) select(null);
+}
+
 const picker = createPicker(app, goTo);
+const addSheet = createSheet(app, 'Add a design');
+const moreSheet = createSheet(app, 'More');
+
+$('btn-add').addEventListener('click', () => addSheet.open([
+  { label: 'From a file', hint: 'SVG or PNG', onClick: () => designInput.click() },
+  { label: 'Test pattern', hint: '10 cm grid with a 6 cm circle', onClick: () => void designs.addTestPattern().then(startPlacing) },
+  ...[...designs.entries.values()].filter((e) => e.source.name !== 'test-pattern.svg').map((e) => ({ label: `Place again: ${e.source.name}`, onClick: () => startPlacing(e) })),
+]));
 $('btn-parts').addEventListener('click', picker.open);
-$('btn-reset').addEventListener('click', () => viewer.frameBody(heightM()));
-$('btn-load').addEventListener('click', () => fileInput.click());
-$('btn-design').addEventListener('click', () => designInput.click());
-$('btn-test').addEventListener('click', async () => startPlacing(await getTestDesign()));
-fileInput.addEventListener('change', () => { loadFiles(Array.from(fileInput.files ?? [])); fileInput.value = ''; });
+$('btn-undo').addEventListener('click', undo);
+$('btn-redo').addEventListener('click', redo);
+$('btn-compare').addEventListener('click', () => setCompare(!compare));
+$('btn-photo').addEventListener('click', () => void takePhoto());
+$('btn-more').addEventListener('click', () => moreSheet.open([
+  { label: 'Load my scan', hint: 'GLB, OBJ or PLY from this device', onClick: () => fileInput.click() },
+  { label: 'Save project', hint: 'Designs and placements as a file', onClick: saveProject },
+  { label: 'Open project', hint: 'A saved .json file', onClick: () => projectInput.click() },
+  { label: 'Reset view', onClick: () => viewer.frameBody(heightM()) },
+  { label: `Height: ${heightCm} cm`, hint: 'Used to scale the body', onClick: () => { const v = window.prompt('Your height in cm', String(heightCm)); if (v && Number(v)) setHeight(Number(v)); } },
+  { label: 'Clear all designs', danger: true, onClick: () => { if (placed.length && window.confirm('Remove all placed designs?')) { clearPlacements(); commit(); } } },
+]));
+fileInput.addEventListener('change', () => { void loadFiles(Array.from(fileInput.files ?? [])); fileInput.value = ''; });
 designInput.addEventListener('change', async () => {
   const f = designInput.files?.[0]; designInput.value = '';
   if (!f) return;
-  try { startPlacing(await loadDesignFile(f)); } catch (err) { setStatus(`Could not read design: ${(err as Error).message}`); }
+  try { startPlacing(await designs.addFile(f)); } catch (err) { setStatus(`Could not read design: ${(err as Error).message}`); }
 });
-heightInput.addEventListener('change', () => {
-  localStorage.setItem(HEIGHT_KEY, String(Math.round(heightM() * 100)));
-  heightInput.value = String(Math.round(heightM() * 100));
-  const body = viewer.getBody();
-  if (body && (body as Mesh).name === 'placeholder-body') showPlaceholder();
-  else if (body) {
-    const inner = body.children[0];
-    if (inner) { body.remove(inner); const { group } = fitToHeight(inner, heightM()); viewer.setBody(group); afterBodyChange(); bodyStatus(); }
-  }
-});
+projectInput.addEventListener('change', () => { const f = projectInput.files?.[0]; projectInput.value = ''; if (f) void openProject(f); });
 stage.addEventListener('dragover', (e) => { e.preventDefault(); });
 stage.addEventListener('drop', (e) => {
   e.preventDefault();
   const files = Array.from(e.dataTransfer?.files ?? []);
   const design = files.find((f) => /\.(svg|png|jpe?g|webp)$/i.test(f.name));
-  if (design && files.length === 1) loadDesignFile(design).then(startPlacing).catch((err) => setStatus(`Could not read design: ${(err as Error).message}`));
-  else loadFiles(files);
+  const project = files.find((f) => /\.json$/i.test(f.name));
+  if (project) void openProject(project);
+  else if (design && files.length === 1) designs.addFile(design).then(startPlacing).catch((err) => setStatus(`Could not read design: ${(err as Error).message}`));
+  else void loadFiles(files);
 });
+window.addEventListener('keydown', (e) => {
+  const tag = (e.target as HTMLElement).tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+  else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && selected) { e.preventDefault(); removeDesign(selected); }
+  else if (e.key === 'Escape') { if (pending) { pending = null; hint.classList.add('hidden'); } else select(null); }
+});
+window.addEventListener('resize', () => { if (compare) setCompare(true); });
+
+// Restore the last session, then build the body.
+try {
+  const saved = localStorage.getItem(PROJECT_KEY);
+  if (saved) { const data = JSON.parse(saved) as ProjectData; if (data.version === 1 && data.placements.length) restorePending = data; }
+} catch { /* ignore */ }
 
 // Small hook for automated checks.
 (window as unknown as { __app: unknown }).__app = {
-  placeTestAt: async (x: number, y: number) => { startPlacing(await getTestDesign()); return placeAt(x, y); },
+  placeTestAt: async (x: number, y: number) => { startPlacing(await designs.addTestPattern()); const hit = pickSurface(x, y); if (!hit) return false; pending = null; hint.classList.add('hidden'); place(designs.get([...designs.entries.keys()][0])!, hit.tri, hit.point); return true; },
   selected: () => selected,
-  set: (fn: (d: PlacedDesign) => void) => { if (selected) { fn(selected); showPanel(selected); recompute(selected); } },
-  goTo: (id: string) => { const def = (window as unknown as { __regions: RegionDef[] }).__regions?.find((r) => r.id === id); if (def) goTo(def); },
-  busy: () => busy,
+  placed: () => placed,
+  set: (fn: (d: PlacedDesign) => void) => { if (selected) { fn(selected); panel.show(selected); recompute(selected, true); commit(); } },
+  goTo: (id: string) => { const def = REGIONS.find((r) => r.id === id); if (def) goTo(def); },
+  busy: anyBusy,
+  handles: () => (selected && surface ? selected.handles(surface) : null),
+  toScreen,
+  history: () => ({ canUndo: history.canUndo, canRedo: history.canRedo }),
+  undo, redo, setCompare,
 };
-import('./body/regions').then((m) => { (window as unknown as { __regions: RegionDef[] }).__regions = m.REGIONS; });
 
 showPlaceholder();

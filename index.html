@@ -10,38 +10,20 @@
   <div id="app">
     <div class="bar top">
       <span class="title">Tattoo preview</span>
-      <button id="btn-design" class="btn primary">Design</button>
-      <button id="btn-test" class="btn">Test pattern</button>
+      <button id="btn-add" class="btn primary">Add design</button>
       <button id="btn-parts" class="btn">Body part</button>
-      <button id="btn-load" class="btn">Load scan</button>
-      <button id="btn-reset" class="btn">Reset view</button>
-      <label class="field">Height <input id="height" type="number" inputmode="numeric" min="50" max="250" step="1" /> cm</label>
+      <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
+      <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
+      <button id="btn-compare" class="btn toggle">Compare</button>
+      <button id="btn-photo" class="btn">Photo</button>
+      <button id="btn-more" class="btn">More</button>
       <input id="file" type="file" multiple accept=".glb,.gltf,.bin,.obj,.mtl,.ply,.jpg,.jpeg,.png,.webp" class="hidden" />
       <input id="design-file" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg" class="hidden" />
+      <input id="project-file" type="file" accept=".json,application/json" class="hidden" />
     </div>
     <div id="stage">
-      <div id="hint" class="hint hidden">Tap the body where the centre of the design should go</div>
-    <div id="panel" class="panel hidden">
-      <div class="panel-head"><span class="name" id="p-name">Design</span><span class="muted" id="p-summary"></span><button id="p-collapse" class="btn ghost">Hide</button></div>
-      <div class="row">
-        <label class="field">Width <input id="p-width" type="number" inputmode="decimal" min="1" max="120" step="0.5" /> cm</label>
-        <span id="p-height" class="muted"></span>
-        <label class="field">Rotate <input id="p-rot" type="range" min="-180" max="180" step="1" value="0" /><span id="p-rot-val">0°</span></label>
-      </div>
-      <div class="row">
-        <button id="p-mirror" class="btn toggle">Mirror</button>
-        <button id="p-wrap" class="btn toggle">Wrap around limb</button>
-        <div class="seg">
-          <button class="btn seg-btn active" data-mode="stencil">Stencil</button>
-          <button class="btn seg-btn" data-mode="inked">Inked</button>
-          <button class="btn seg-btn" data-mode="heatmap">Heatmap</button>
-        </div>
-        <label class="field">Opacity <input id="p-opacity" type="range" min="0.1" max="1" step="0.05" value="1" /></label>
-        <button id="p-move" class="btn">Move</button>
-        <button id="p-remove" class="btn danger">Remove</button>
-      </div>
-      <div id="p-readout" class="readout"></div>
-    </div>
+      <div id="hint" class="hint hidden"></div>
+      <div id="compare-labels" class="compare-labels hidden"><span>A</span><span>B</span></div>
     </div>
     <div id="status" class="bar bottom">Starting…</div>
   </div>
