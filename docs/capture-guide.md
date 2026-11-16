@@ -21,6 +21,14 @@ by a helper walking around me with my iPhone 16. Two to three minutes.
   face forward, eyes on one fixed point. Breathe shallowly, do not talk,
   do not shift weight. Micro-movement is the number one cause of failure.
 
+## Two ways to shoot
+
+Camera app: best image quality (24 MP). Capture assistant in the web
+app (More, Capture assistant): lower resolution frames but a compass
+progress ring, a blur warning, automatic shots every 6 degrees and ZIP
+export. Use the assistant for the first attempt; switch to the Camera
+app if the reconstruction lacks detail.
+
 ## During
 
 The helper walks slowly around me in three closed rings, taking a photo

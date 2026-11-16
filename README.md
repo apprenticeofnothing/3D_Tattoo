@@ -46,8 +46,12 @@ both devices are on the same Wi-Fi.
   open a project file (designs embedded, no body data), autosave of the
   last session in the browser, PNG photo export (share sheet on iPhone),
   and a split A/B compare view.
-- Next: phase 4, reconstruction from photos (capture assistant page, Mac
-  script around Apple's photogrammetry engine, mesh prep).
+- Phase 4 (tools written, awaiting the first real scan): capture
+  assistant page (`capture.html`) with compass ring progress, blur check,
+  auto shooting and ZIP export; `tools/recon`, a Swift command-line wrapper
+  around Apple's photogrammetry engine (not compiled here); Blender mesh
+  prep script in `tools/mesh-prep`; orientation controls for loaded scans.
+  Walkthrough in `docs/pipeline.md`.
 
 ## How the mapping works
 

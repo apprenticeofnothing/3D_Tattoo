@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#000" />
+  <title>Capture assistant</title>
+</head>
+<body class="capture">
+  <div id="cap">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+    <div id="intro" class="intro">
+      <h1>Body scan capture</h1>
+      <p>For the helper holding the phone. The person being scanned stands still in an A-pose for the whole session.</p>
+      <ol>
+        <li>Even soft light, no flash, plain background, 1 m from walls.</li>
+        <li>Tight, matte, patterned, not black clothing. Skin to be tattooed bare. Hair tied back.</li>
+        <li>Three rings around the body: knee height, chest height, above the head. Then close-ups of the tattoo areas.</li>
+        <li>Walk slowly, keep the whole body in frame, stop briefly for each shot.</li>
+      </ol>
+      <p class="muted">Photos stay on this phone. At the end you export them as ZIP files to AirDrop to the Mac. The phone's own Camera app gives higher resolution stills; this page gives even spacing and a sharpness check. Both work.</p>
+      <button id="start" class="btn primary big">Start camera</button>
+      <p id="start-note" class="muted"></p>
+    </div>
+    <div id="hud" class="hud hidden">
+      <div class="hud-top">
+        <span id="ring-label">Ring 1 · knee height</span>
+        <span id="res"></span>
+      </div>
+      <div class="hud-bottom">
+        <div class="hud-row">
+          <span id="count">0 shots</span>
+          <span id="sharp"></span>
+          <span id="heading"></span>
+        </div>
+        <div class="hud-row">
+          <button id="auto" class="btn toggle">Auto every 6°</button>
+          <button id="shoot" class="btn primary big">Shoot</button>
+          <button id="next" class="btn">Next ring</button>
+        </div>
+        <div class="hud-row">
+          <button id="undo" class="btn ghost">Delete last</button>
+          <button id="export" class="btn">Export ZIP</button>
+          <button id="clear" class="btn ghost danger">Clear all</button>
+          <a class="btn ghost" href="./">Back to app</a>
+        </div>
+      </div>
+    </div>
+    <img id="thumb" class="thumb hidden" alt="" />
+  </div>
+  <script type="module" src="/src/capture/main.ts"></script>
+</body>
+</html>

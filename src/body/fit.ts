@@ -16,7 +16,7 @@ export interface FitInfo {
  * Wrap `object` in a group transformed so the body stands on the floor with
  * the requested height. The original object is not modified.
  */
-export function fitToHeight(object: Object3D, heightM: number): { group: Group; info: FitInfo } {
+export function fitToHeight(object: Object3D, heightM: number, options: { autoUpright?: boolean } = {}): { group: Group; info: FitInfo } {
   const group = new Group();
   group.add(object);
   object.updateMatrixWorld(true);
@@ -26,7 +26,7 @@ export function fitToHeight(object: Object3D, heightM: number): { group: Group; 
   let rotated = false;
   // Photogrammetry exports are often Z-up. If the model is clearly taller
   // along Z than along Y, rotate it upright.
-  if (size.z > size.y * 1.3 && size.z >= size.x) {
+  if (options.autoUpright !== false && size.z > size.y * 1.3 && size.z >= size.x) {
     object.rotation.x = -Math.PI / 2;
     object.updateMatrixWorld(true);
     box = new Box3().setFromObject(object);

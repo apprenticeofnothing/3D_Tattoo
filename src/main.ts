@@ -1,5 +1,5 @@
 import './style.css';
-import { Mesh, Raycaster, Vector2, Vector3 } from 'three';
+import { Euler, Mesh, Object3D, Quaternion, Raycaster, Vector2, Vector3 } from 'three';
 import { fitToHeight } from './body/fit';
 import { makePlaceholderBody } from './body/placeholder';
 import { locateRegion, REGIONS, type RegionDef } from './body/regions';
@@ -40,6 +40,13 @@ let selected: PlacedDesign | null = null;
 let pending: DesignEntry | null = null; // design waiting for a tap
 let restorePending: ProjectData | null = null;
 let compare = false;
+// Loaded scan and its manual orientation (scans come out of photogrammetry in arbitrary poses).
+type UpAxis = 'y' | 'z' | 'x' | '-y' | '-z' | '-x';
+const UP_CYCLE: UpAxis[] = ['y', 'z', 'x', '-y', '-z', '-x'];
+let scanObject: Object3D | null = null;
+let scanInfo = { triangles: 0, textured: false };
+let orient: { up: UpAxis; turn: number } = { up: 'y', turn: 0 };
+let orientManual = false;
 
 function setStatus(text: string) { status.textContent = text; }
 function bodyStatus() { setStatus(`${bodyLabel} · ${heightCm} cm${bodyInfo}`); }
@@ -80,16 +87,60 @@ async function loadFiles(files: File[]) {
   setStatus(`Loading ${files.map((f) => f.name).join(', ')}…`);
   try {
     const loaded = await loadBodyFiles(files);
-    const { group, info } = fitToHeight(loaded.object, heightM());
-    viewer.setBody(group);
+    scanObject = loaded.object;
+    scanInfo = { triangles: loaded.triangles, textured: loaded.textured };
     bodyLabel = files.find((f) => /\.(glb|gltf|obj|ply)$/i.test(f.name))?.name ?? 'Scan';
-    bodyInfo = ` · ${(loaded.triangles / 1000).toFixed(0)}k triangles${loaded.textured ? ' · textured' : ''}${info.rotatedToYUp ? ' · rotated to upright' : ''}`;
-    afterBodyChange();
-    bodyStatus();
+    // Remember how this file was last oriented.
+    const saved = localStorage.getItem(`tattoo.orient.${bodyLabel}`);
+    if (saved) { try { orient = JSON.parse(saved); orientManual = true; } catch { orient = { up: 'y', turn: 0 }; orientManual = false; } }
+    else { orient = { up: 'y', turn: 0 }; orientManual = false; }
+    applyScan();
   } catch (err) {
     console.error(err);
     setStatus(`Could not load: ${(err as Error).message}`);
   }
+}
+
+/** Quaternion that maps the chosen up axis to +Y, then turns about Y. */
+function orientationQuaternion(o: { up: UpAxis; turn: number }): Quaternion {
+  const up = new Quaternion();
+  const d = Math.PI / 2;
+  switch (o.up) {
+    case 'y': break;
+    case 'z': up.setFromEuler(new Euler(-d, 0, 0)); break;
+    case '-z': up.setFromEuler(new Euler(d, 0, 0)); break;
+    case 'x': up.setFromEuler(new Euler(0, 0, d)); break;
+    case '-x': up.setFromEuler(new Euler(0, 0, -d)); break;
+    case '-y': up.setFromEuler(new Euler(Math.PI, 0, 0)); break;
+  }
+  const turn = new Quaternion().setFromEuler(new Euler(0, (o.turn * Math.PI) / 2, 0));
+  return turn.multiply(up);
+}
+
+/** (Re)build the fitted body from the loaded scan with the current orientation and height. */
+function applyScan() {
+  if (!scanObject) return;
+  if (scanObject.parent) scanObject.parent.remove(scanObject);
+  const holder = new Object3D();
+  holder.quaternion.copy(orientationQuaternion(orient));
+  holder.add(scanObject);
+  const { group, info } = fitToHeight(holder, heightM(), { autoUpright: !orientManual });
+  // If the automatic upright fix fired, record it so manual turns start from what is on screen.
+  if (info.rotatedToYUp && !orientManual) orient = { up: 'z', turn: orient.turn };
+  viewer.setBody(group);
+  const notes = [scanInfo.textured ? 'textured' : '', info.rotatedToYUp ? 'rotated to upright' : '', orientManual ? `up ${orient.up}, turned ${orient.turn * 90}°` : ''].filter(Boolean);
+  bodyInfo = ` · ${(scanInfo.triangles / 1000).toFixed(0)}k triangles${notes.length ? ' · ' + notes.join(' · ') : ''}`;
+  afterBodyChange();
+  bodyStatus();
+}
+
+function changeOrientation(change: (o: { up: UpAxis; turn: number }) => void) {
+  if (!scanObject) { setStatus('Orientation applies to a loaded scan. The placeholder is already upright.'); return; }
+  change(orient);
+  orient.turn = ((orient.turn % 4) + 4) % 4;
+  orientManual = true;
+  localStorage.setItem(`tattoo.orient.${bodyLabel}`, JSON.stringify(orient));
+  applyScan();
 }
 
 function setHeight(cm: number) {
@@ -100,10 +151,7 @@ function setHeight(cm: number) {
   // Keep the placements: they are re-applied by location after the body is rebuilt.
   restorePending = projectData();
   if ((body as Mesh).name === 'placeholder-body') showPlaceholder();
-  else {
-    const inner = body.children[0];
-    if (inner) { body.remove(inner); const { group } = fitToHeight(inner, heightM()); viewer.setBody(group); afterBodyChange(); bodyStatus(); }
-  }
+  else applyScan();
 }
 
 function goTo(def: RegionDef) {
@@ -496,6 +544,7 @@ function startPlacing(entry: DesignEntry) {
 const picker = createPicker(app, goTo);
 const addSheet = createSheet(app, 'Add a design');
 const moreSheet = createSheet(app, 'More');
+const orientSheet = createSheet(app, 'Orientation of the scan');
 
 $('btn-add').addEventListener('click', () => addSheet.open([
   { label: 'From a file', hint: 'SVG or PNG', onClick: () => designInput.click() },
@@ -512,6 +561,14 @@ $('btn-more').addEventListener('click', () => moreSheet.open([
   { label: 'Save project', hint: 'Designs and placements as a file', onClick: saveProject },
   { label: 'Open project', hint: 'A saved .json file', onClick: () => projectInput.click() },
   { label: 'Reset view', onClick: () => viewer.frameBody(heightM()) },
+  { label: 'Capture assistant', hint: 'Guided photo session for the scan', onClick: () => { location.href = 'capture.html'; } },
+  { label: 'Orientation', hint: 'Stand the scan up, turn it to face you', onClick: () => orientSheet.open([
+    { label: 'Turn left 90°', onClick: () => changeOrientation((o) => { o.turn -= 1; }) },
+    { label: 'Turn right 90°', onClick: () => changeOrientation((o) => { o.turn += 1; }) },
+    { label: 'Turn around 180°', hint: 'Front and back swapped', onClick: () => changeOrientation((o) => { o.turn += 2; }) },
+    { label: 'Change which axis is up', hint: `Now: ${orient.up}. Cycles through all six.`, onClick: () => changeOrientation((o) => { o.up = UP_CYCLE[(UP_CYCLE.indexOf(o.up) + 1) % UP_CYCLE.length]; }) },
+    { label: 'Reset orientation', onClick: () => changeOrientation((o) => { o.up = 'y'; o.turn = 0; }) },
+  ]) },
   { label: `Height: ${heightCm} cm`, hint: 'Used to scale the body', onClick: () => { const v = window.prompt('Your height in cm', String(heightCm)); if (v && Number(v)) setHeight(Number(v)); } },
   { label: 'Clear all designs', danger: true, onClick: () => { if (placed.length && window.confirm('Remove all placed designs?')) { clearPlacements(); commit(); } } },
 ]));
@@ -561,6 +618,7 @@ try {
   toScreen,
   history: () => ({ canUndo: history.canUndo, canRedo: history.canRedo }),
   undo, redo, setCompare,
+  orient: () => orient, changeOrientation, status: () => status.textContent,
 };
 
 showPlaceholder();
