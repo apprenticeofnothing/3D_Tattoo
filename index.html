@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#262a33" />
+  <title>Tattoo preview</title>
+</head>
+<body>
+  <div id="app">
+    <div class="bar top">
+      <span class="title">Tattoo preview</span>
+      <button id="btn-load" class="btn primary">Load scan</button>
+      <button id="btn-parts" class="btn">Body part</button>
+      <button id="btn-reset" class="btn">Reset view</button>
+      <label class="field">Height <input id="height" type="number" inputmode="numeric" min="50" max="250" step="1" /> cm</label>
+      <input id="file" type="file" multiple accept=".glb,.gltf,.bin,.obj,.mtl,.ply,.jpg,.jpeg,.png,.webp" class="hidden" />
+    </div>
+    <div id="stage"></div>
+    <div id="status" class="bar bottom">Starting…</div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
