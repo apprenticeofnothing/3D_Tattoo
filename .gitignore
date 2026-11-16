@@ -1,0 +1,18 @@
+# Body photos, scans, meshes and exports never go in the repo
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.glb
+*.gltf
+*.obj
+*.ply
+/scans
+/exports
+
+# Exception: small synthetic test assets
+!/test-assets/**
+
+# Build output and dependencies
+node_modules/
+dist/
