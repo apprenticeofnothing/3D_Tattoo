@@ -82,7 +82,7 @@ export class PlacedDesign {
     return this.result;
   }
 
-  private getLocator(surface: SurfaceMesh): PatchLocator | null {
+  getLocator(surface: SurfaceMesh): PatchLocator | null {
     if (!this.result) return null;
     if (!this.locator) this.locator = new PatchLocator(surface, this.result.patch);
     return this.locator;

@@ -52,6 +52,9 @@ both devices are on the same Wi-Fi.
   around Apple's photogrammetry engine (not compiled here); Blender mesh
   prep script in `tools/mesh-prep`; orientation controls for loaded scans.
   Walkthrough in `docs/pipeline.md`.
+- Phase 5 (polish, in progress): tape measure (distance along the skin
+  between two taps, circumference of a limb at a tap, both drawn on the
+  body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).
 
 ## How the mapping works
 

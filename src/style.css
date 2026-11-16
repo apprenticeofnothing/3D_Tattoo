@@ -75,3 +75,8 @@ input[type=range] { width: 140px; min-height: var(--tap); accent-color: var(--ac
 .compare-labels span { flex: 1; padding: 10px 14px; font-weight: 800; font-size: 22px; color: var(--accent); text-shadow: 0 1px 4px #000; }
 .compare-labels:not(.stacked) span + span { border-left: 1px solid #444a57; }
 .compare-labels.stacked span + span { border-top: 1px solid #444a57; }
+
+.measure-bar { position: absolute; left: 8px; right: 8px; top: 8px; z-index: 6; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  background: rgba(38,42,51,.96); border: 1px solid #343944; border-radius: 14px; padding: 8px 10px; }
+.measure-text { flex: 1; min-width: 160px; font-size: 15px; }
+.measure-text b { color: #ffd166; font-size: 18px; }

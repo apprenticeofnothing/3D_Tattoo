@@ -10,6 +10,8 @@ import { Panel } from './ui/panel';
 import { attachGestures, type DragKind } from './ui/gestures';
 import { Viewer, type CompareSide } from './viewer/Viewer';
 import { SelectionGizmo } from './viewer/SelectionGizmo';
+import { MeasureOverlay } from './viewer/MeasureOverlay';
+import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
 import { History, newId, type PlacementData, type ProjectData } from './app/project';
@@ -29,6 +31,8 @@ const heightM = () => heightCm / 100;
 const viewer = new Viewer(stage);
 const gizmo = new SelectionGizmo();
 viewer.scene.add(gizmo.group);
+const measureOverlay = new MeasureOverlay();
+viewer.scene.add(measureOverlay.group);
 const designs = new DesignStore();
 const history = new History();
 let surface: SurfaceMesh | null = null;
@@ -40,6 +44,9 @@ let selected: PlacedDesign | null = null;
 let pending: DesignEntry | null = null; // design waiting for a tap
 let restorePending: ProjectData | null = null;
 let compare = false;
+// Tape measure
+let measuring: null | 'distance' | 'around' = null;
+let measureFirst: SurfacePoint | null = null;
 // Loaded scan and its manual orientation (scans come out of photogrammetry in arbitrary poses).
 type UpAxis = 'y' | 'z' | 'x' | '-y' | '-z' | '-x';
 const UP_CYCLE: UpAxis[] = ['y', 'z', 'x', '-y', '-z', '-x'];
@@ -444,6 +451,50 @@ function setCompare(on: boolean) {
   if (on) setStatus('Compare: left shows A, right shows B. Set each design\'s "Compare as" in its panel.');
 }
 
+// ---------- Tape measure ----------
+
+function setMeasure(mode: null | 'distance' | 'around') {
+  measuring = mode;
+  measureFirst = null;
+  $('btn-measure').classList.toggle('active', !!mode);
+  $('measure-bar').classList.toggle('hidden', !mode);
+  if (!mode) { measureOverlay.clear(); viewer.requestRender(); return; }
+  if (selected) select(null);
+  $('measure-bar').querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.measure === mode));
+  $('measure-text').textContent = mode === 'distance' ? 'Tap two points on the skin' : 'Tap a point on an arm, leg or the torso';
+  measureOverlay.clear(); viewer.requestRender();
+}
+
+function measureTap(hit: SurfacePoint) {
+  if (!surface || !measuring) return;
+  const fmt = (m: number) => `${(m * 100).toFixed(1)} cm`;
+  if (measuring === 'around') {
+    const c = circumferenceAt(surface, hit);
+    if (!c) { $('measure-text').textContent = 'No closed loop here. Try a point on a limb.'; measureOverlay.clear(); viewer.requestRender(); return; }
+    measureOverlay.set(c.points, [hit.point], true);
+    $('measure-text').innerHTML = `Around: <b>${fmt(c.length)}</b>${c.fromShape ? '' : ' (horizontal cut)'}`;
+    viewer.requestRender();
+    return;
+  }
+  if (!measureFirst) {
+    measureFirst = hit;
+    measureOverlay.set([hit.point], [hit.point]);
+    $('measure-text').textContent = 'Now tap the second point';
+    viewer.requestRender();
+    return;
+  }
+  const r = distanceOnSkin(surface, measureFirst, hit);
+  if (!r) { $('measure-text').textContent = 'Too far apart for one measurement. Tap a nearer second point.'; measureFirst = null; return; }
+  measureOverlay.set(r.path, [measureFirst.point, hit.point]);
+  $('measure-text').innerHTML = `Along the skin: <b>${fmt(r.geodesic)}</b> · straight line ${fmt(r.straight)}. Tap again to start over.`;
+  measureFirst = null;
+  viewer.requestRender();
+}
+
+$('btn-measure').addEventListener('click', () => setMeasure(measuring ? null : 'distance'));
+$('measure-done').addEventListener('click', () => setMeasure(null));
+$('measure-bar').querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => b.addEventListener('click', () => setMeasure(b.dataset.measure as 'distance' | 'around')));
+
 // ---------- Gestures ----------
 
 type Drag = { kind: DragKind; offset: { dx: number; dy: number } };
@@ -458,7 +509,7 @@ function nearHandle(x: number, y: number, p: [number, number, number] | null): b
 
 attachGestures(viewer.renderer.domElement, viewer.controls, {
   hitTest(x, y) {
-    if (compare || !surface) return null;
+    if (compare || !surface || measuring) return null;
     if (selected?.result) {
       const h = selected.handles(surface);
       if (nearHandle(x, y, h.rotate)) return 'rotate';
@@ -470,6 +521,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     return null;
   },
   onTap(x, y) {
+    if (measuring) { const hit = pickSurface(x, y); if (hit) measureTap(hit); return; }
     if (pending) {
       const hit = pickSurface(x, y);
       if (!hit) { setStatus('That tap missed the body. Try again.'); return; }
@@ -596,7 +648,27 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
   else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && selected) { e.preventDefault(); removeDesign(selected); }
-  else if (e.key === 'Escape') { if (pending) { pending = null; hint.classList.add('hidden'); } else select(null); }
+  else if (e.key === 'Escape') { if (measuring) setMeasure(null); else if (pending) { pending = null; hint.classList.add('hidden'); } else select(null); }
+  else if (selected && surface && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '[', ']'].includes(e.key)) {
+    e.preventDefault();
+    const p = selected.placement;
+    if (e.key === '[' || e.key === ']') {
+      const step = (e.shiftKey ? 10 : 1) * (Math.PI / 180) * (e.key === ']' ? -1 : 1);
+      p.rotation = Math.atan2(Math.sin(p.rotation + step), Math.cos(p.rotation + step));
+    } else {
+      // Move 1 mm (10 mm with Shift) along the design's own axes, on the skin.
+      const step = e.shiftKey ? 0.01 : 0.001;
+      const du = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+      const dv = e.key === 'ArrowUp' ? step : e.key === 'ArrowDown' ? -step : 0;
+      const loc = selected.getLocator(surface);
+      const hit = loc?.locateTri(du, dv);
+      if (!hit) return;
+      p.tri = hit.tri; p.point = hit.point;
+    }
+    recompute(selected, true);
+    panel.show(selected);
+    commit();
+  }
 });
 window.addEventListener('resize', () => { if (compare) setCompare(true); });
 
@@ -619,6 +691,7 @@ try {
   history: () => ({ canUndo: history.canUndo, canRedo: history.canRedo }),
   undo, redo, setCompare,
   orient: () => orient, changeOrientation, status: () => status.textContent,
+  setMeasure, measureTap, pickSurface, measureText: () => $('measure-text').textContent,
 };
 
 showPlaceholder();

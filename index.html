@@ -14,6 +14,7 @@
       <button id="btn-parts" class="btn">Body part</button>
       <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)" disabled>Undo</button>
       <button id="btn-redo" class="btn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
+      <button id="btn-measure" class="btn toggle">Measure</button>
       <button id="btn-compare" class="btn toggle">Compare</button>
       <button id="btn-photo" class="btn">Photo</button>
       <button id="btn-more" class="btn">More</button>
@@ -24,6 +25,11 @@
     <div id="stage">
       <div id="hint" class="hint hidden"></div>
       <div id="compare-labels" class="compare-labels hidden"><span>A</span><span>B</span></div>
+      <div id="measure-bar" class="measure-bar hidden">
+        <div class="seg"><button class="btn seg-btn active" data-measure="distance">Distance</button><button class="btn seg-btn" data-measure="around">Around</button></div>
+        <span id="measure-text" class="measure-text">Tap two points on the skin</span>
+        <button id="measure-done" class="btn ghost">Done</button>
+      </div>
     </div>
     <div id="status" class="bar bottom">Starting…</div>
   </div>
