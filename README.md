@@ -10,10 +10,14 @@ and `docs/` for the reconstruction research and capture guide.
 Online (after each push, via GitHub Pages):
 https://apprenticeofnothing.github.io/3D_Tattoo/
 
-One-time setup on GitHub: Settings, Pages, Source "GitHub Actions". If a
-deploy fails with "branch not allowed to deploy to github-pages", go to
-Settings, Environments, github-pages, and allow the branch pattern
-`claude/*` (or merge to main).
+The repository is private. GitHub Pages on a private repository needs a
+paid GitHub plan; on the free plan the deploy step is skipped (the
+workflow still runs the tests and the build). To get the online URL,
+either make the repository public (it never contains body data) or
+upgrade the plan, then in Settings, Pages set Source to "GitHub
+Actions". If a deploy then fails with "branch not allowed to deploy to
+github-pages", allow the branch pattern `claude/*` under Settings,
+Environments, github-pages.
 
 On the Mac:
 
