@@ -86,7 +86,9 @@ await phone.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
 await ready(phone);
 await phone.evaluate(() => { window.__app.closeBodyPanel(); window.__app.viewFrom(0); });
 await phone.waitForTimeout(900);
-const pf = await phone.evaluate(() => window.__app.ringScreen(0));
+// Grab the front of the ring (lowest on screen, nearest the camera): the side points are
+// ambiguous, since the far side of the ring turns the other way, like a real turntable.
+const pf = await phone.evaluate(() => { let best = null; for (let d = 0; d < 360; d += 5) { const p = window.__app.ringScreen(d); if (!best || p.y > best.y) best = p; } return best; });
 const py0 = await phone.evaluate(() => window.__app.cameraYaw());
 const cdp = await phone.context().newCDPSession(phone);
 await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: pf.x, y: pf.y }] });
