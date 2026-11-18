@@ -10,6 +10,7 @@
 //   C  a typed tape-measure width: exact size
 //   D  phone: the editor and placing work with touch-sized layout
 //   E  cover-up: how much a new design hides, what shows through, size to cover
+//   F  (with a textured scan dir as 2nd argument) pick up a tattoo from the scan's texture
 //
 // Size error is from the spread of the ink around its centre (independent
 // of rotation and of how dark the ink came out); orientation from the angle
@@ -239,5 +240,34 @@ async function placeAndCompare(page, truth, label, width) {
   await idle(page); await page.waitForTimeout(1200);
   log(`D phone: placed ${await page.evaluate(() => window.__app.placed().filter((d) => d.placement.existing).length)} existing tattoo(s); status "${await page.textContent('#status')}"`);
   await page.screenshot({ path: `${out}/et-D-phone-placed.png` });
+}
+// ---- F: pick up a tattoo that is in a textured scan ----------------------------
+// Needs the synthetic scan: npx vite-node e2e/make-textured-scan.ts <dir>, passed as the second argument.
+if (process.argv[3]) {
+  const dir = process.argv[3];
+  const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
+  page.on('pageerror', (e) => log(`pageerror: ${e.message}`));
+  await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.__app?.surfaceInfo(), null, { timeout: 60000 });
+  await page.setInputFiles('#file', [`${dir}/scan.obj`, `${dir}/scan.mtl`, `${dir}/scan.png`]);
+  await page.waitForFunction(() => /triangles/.test(document.getElementById('status').textContent) && /textured/.test(document.getElementById('status').textContent), null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.changeOrientation((o) => { o.up = 'y'; o.turn = 0; }));
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => window.__app.viewFrom(0));
+  await page.waitForTimeout(1500);
+  await page.click('#btn-add');
+  await page.click('.menu-item:has-text("Existing tattoo from my scan")');
+  // The dark disk is on the front of the cylinder at 1.158 m.
+  const p = await page.evaluate(() => window.__app.toScreen([0, 1.158, 0.15]));
+  await page.mouse.click(p.x, p.y);
+  await page.waitForFunction(() => /Picked up|No tattoo|runs on/.test(document.getElementById('status').textContent), null, { timeout: 60000 });
+  await idle(page); await page.waitForTimeout(500);
+  const id = await page.evaluate(() => window.__app.placed().find((d) => d.placement.existing)?.placement.id);
+  const st = id ? await page.evaluate((i) => window.__app.inkStats(i), id) : null;
+  const dia = st ? st.spread * 2 * Math.SQRT2 : NaN;
+  log(`F scan: "${await page.textContent('#status')}"; disk ${dia.toFixed(2)} cm across from the ink spread (true 8.00), centre ${st ? (norm(sub(st.centre, [0, 1.158, 0.15])) * 1000).toFixed(1) : '?'} mm from the true centre`);
+  await page.evaluate(() => window.__app.set((d) => { d.placement.hidden = false; d.decal.mesh.visible = true; d.placement.mode = 'stencil'; }));
+  await idle(page); await page.waitForTimeout(800);
+  await page.screenshot({ path: `${out}/et-F-scan.png` });
 }
 await browser.close();

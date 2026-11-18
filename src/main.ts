@@ -21,6 +21,12 @@ import { ExportDialog, type ExportChoice } from './ui/exportDialog';
 import { ExistingImport, type ImportAnalysis, type ImportResult } from './ui/existingImport';
 import { autoGuides } from './existing/autoGuide';
 import { detectPose } from './existing/poseModel';
+import { renderSkin, type ScanTexture } from './existing/scanTrace';
+import { extractInk } from './existing/inkExtract';
+import { keepCentralInk } from './existing/flatten';
+import { crop } from './existing/image';
+import { rgbaToCanvas } from './ui/existingImport';
+import { PatchLocator } from './mapping/locate';
 import { describeHint, HALF_WIDTH, maskEdges, suggestFromPose, type PoseHint } from './existing/poseSuggest';
 import type { Rgba } from './existing/image';
 import { widthFromCircumference, widthFromVisibleWidth } from './existing/flatten';
@@ -992,7 +998,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
       if (nearHandle(x, y, h.rotate)) return 'rotate';
       if (nearHandle(x, y, h.scale)) return 'scale';
     }
-    if (pending) return null; // placing: let taps through, camera otherwise
+    if (pending || pickingFromScan) return null; // placing: let taps through, camera otherwise
     const d = pickDesign(x, y);
     if (d) {
       if (d !== selected) select(d);
@@ -1005,12 +1011,19 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     const now = performance.now();
     const dbl = lastTap && now - lastTap.t < 350 && Math.hypot(x - lastTap.x, y - lastTap.y) < 25;
     lastTap = dbl ? null : { x, y, t: now };
-    if (dbl && !pending && !measuring && !ringHit(x, y)) {
+    if (dbl && !pending && !pickingFromScan && !measuring && !ringHit(x, y)) {
       raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
       const hit = raycaster.intersectObjects(viewer.bodyMeshes(), false)[0];
       if (hit) { viewer.zoomAt(hit.point.clone(), 0.45); return; }
     }
     if (measuring) { const hit = pickSurface(x, y); if (hit) measureTap(hit); return; }
+    if (pickingFromScan) {
+      const hit = pickSurface(x, y);
+      if (!hit) { setStatus('That tap missed the body. Try again.'); return; }
+      pickingFromScan = false; hint.classList.add('hidden');
+      void pickUpFromScan(hit);
+      return;
+    }
     if (pending) {
       const hit = pickSurface(x, y);
       if (!hit) { setStatus('That tap missed the body. Try again.'); return; }
@@ -1525,6 +1538,100 @@ panel.cover.addEventListener('click', (e) => {
   }
 });
 
+// ---------- Existing tattoo from a textured scan ----------
+
+let pickingFromScan = false;
+let scanTex: { surface: SurfaceMesh; tex: ScanTexture | null } | null = null;
+
+/** Texture coordinates and images of the loaded scan, per surface triangle (built once per scan). */
+function scanTexture(): ScanTexture | null {
+  if (!surface) return null;
+  if (scanTex?.surface === surface) return scanTex.tex;
+  const nT = surface.indices.length / 3;
+  const triUv = new Float32Array(nT * 6).fill(NaN), triTex = new Uint8Array(nT);
+  const textures: ScanTexture['textures'] = [];
+  const seen = new Map<unknown, number>();
+  const maxSide = /Mobi|Android|iPhone|iPad/.test(navigator.userAgent) ? 2048 : 4096;
+  for (const src of surface.sources) {
+    const g = src.mesh.geometry, uv = g.getAttribute('uv');
+    const mat = (Array.isArray(src.mesh.material) ? src.mesh.material[0] : src.mesh.material) as { map?: { image?: CanvasImageSource & { width: number; height: number }; flipY: boolean } | null };
+    const map = mat?.map;
+    if (!uv || !map?.image) continue;
+    let ti = seen.get(map);
+    if (ti === undefined) {
+      const im = map.image, k = Math.min(1, maxSide / Math.max(im.width, im.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(im.width * k)); c.height = Math.max(1, Math.round(im.height * k));
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(im, 0, 0, c.width, c.height);
+      ti = textures.length;
+      textures.push({ img: { width: c.width, height: c.height, data: ctx.getImageData(0, 0, c.width, c.height).data }, flipY: map.flipY });
+      seen.set(map, ti);
+    }
+    const index = g.index;
+    for (let k = 0; k < src.triCount; k++) {
+      const orig = src.triStart + k, t = surface.triRemap ? surface.triRemap[orig] : orig;
+      if (t < 0) continue;
+      for (let c = 0; c < 3; c++) {
+        const vi = index ? index.getX(k * 3 + c) : k * 3 + c;
+        triUv[t * 6 + c * 2] = uv.getX(vi); triUv[t * 6 + c * 2 + 1] = uv.getY(vi);
+      }
+      triTex[t] = ti;
+    }
+  }
+  scanTex = { surface, tex: textures.length ? { triUv, triTex, textures } : null };
+  return scanTex.tex;
+}
+
+function startPickFromScan() {
+  if (!scanTexture()) { setStatus('This body has no photo texture to pick a tattoo from. Load a textured scan (GLB, or OBJ with its MTL and images).'); return; }
+  pending = null;
+  pickingFromScan = true;
+  hint.textContent = 'Tap the middle of the tattoo on your scan';
+  hint.classList.remove('hidden');
+  if (selected) select(null);
+}
+
+/**
+ * Lift the tattoo around a tapped spot off the scan's photo texture: render
+ * the skin flat through the stencil mapping (true size and shape), separate
+ * the ink, and keep it as an existing tattoo at exactly that spot. Grows the
+ * area until the ink no longer runs off its edge.
+ */
+async function pickUpFromScan(hit: SkinHit) {
+  const tex = scanTexture();
+  if (!surface || !tex) return;
+  setStatus('Looking at the tattoo on your scan…');
+  await new Promise((r) => setTimeout(r, 30));
+  const normal = normalAt(surface, hit.tri, barycentric(surface, hit.tri, hit.point));
+  const tangent = designTangent(normal, 0);
+  let half = 0.06;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const patch = computeExpMap(surface, { tri: hit.tri, point: hit.point, normal, tangent }, { radius: half * 1.45, exact: true, smoothPasses: 3 });
+    const loc = new PatchLocator(surface, patch);
+    const px = Math.min(1600, Math.round(half * 2 * 8000)); // about 8 pixels per mm
+    const flat = renderSkin((u, v) => loc.locateTri(u, v), tex, half * 2, px);
+    const ink = extractInk(flat);
+    keepCentralInk(ink);
+    if (!ink.bbox) { setStatus('No tattoo found there. Tap right on the ink.'); return; }
+    const edge = Math.round(px * 0.02);
+    const runsOff = ink.bbox.x0 <= edge || ink.bbox.y0 <= edge || ink.bbox.x1 >= px - edge || ink.bbox.y1 >= px - edge;
+    if (runsOff && half < 0.3) { half *= 1.6; continue; }
+    // Crop symmetrically around the tapped spot, so the design's centre is exactly there.
+    const c = px / 2, m = Math.round(px * 0.02) + 2;
+    const hx = Math.min(c, Math.max(c - ink.bbox.x0, ink.bbox.x1 - c) + m), hy = Math.min(c, Math.max(c - ink.bbox.y0, ink.bbox.y1 - c) + m);
+    const img = crop(ink.image, Math.round(c - hx), Math.round(c - hy), Math.round(2 * hx), Math.round(2 * hy));
+    const widthCm = Math.round(((2 * hx) / px) * half * 2 * 1000) / 10;
+    const entry = await designs.addImage(rgbaToCanvas(img), 'tattoo-from-scan.png', widthCm);
+    const d = place(entry, hit.tri, hit.point, { existing: true, mode: 'inked', rotation: 0, hidden: true });
+    if (d) d.decal.mesh.visible = false;
+    const hCm = Math.round(((2 * hy) / px) * half * 2 * 1000) / 10;
+    setStatus(`Picked up a tattoo about ${widthCm} × ${hCm} cm. Your scan already shows it, so this copy is hidden; it is used for cover-up checks ("Hide tattoo" off shows it).`);
+    return;
+  }
+  setStatus('That tattoo runs on further than 60 cm: pick it up in parts.');
+}
+
 // ---------- Existing tattoos ----------
 
 const existingInput = document.createElement('input');
@@ -1736,6 +1843,7 @@ $('btn-add').addEventListener('click', () => addSheet.open([
   { label: 'From a file', hint: 'SVG or PNG', onClick: () => designInput.click() },
   { label: 'Test pattern', hint: '10 cm grid with a 6 cm circle', onClick: () => void designs.addTestPattern().then(startPlacing) },
   { label: 'Existing tattoo from a photo', hint: 'flatten a photo of a tattoo you already have and put it on the body', onClick: () => existingInput.click() },
+  ...(scanObject && scanInfo.textured ? [{ label: 'Existing tattoo from my scan', hint: 'tap a tattoo that is in your textured scan to pick it up exactly', onClick: startPickFromScan }] : []),
   ...[...designs.entries.values()].filter((e) => e.source.name !== 'test-pattern.svg').map((e) => ({ label: `Place again: ${e.source.name}`, onClick: () => startPlacing(e) })),
 ]));
 $('btn-parts').addEventListener('click', picker.open);
