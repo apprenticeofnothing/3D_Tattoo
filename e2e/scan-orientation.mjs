@@ -25,8 +25,10 @@ await page.click('.menu-item:has-text("Change which axis is up")'); await page.w
 logs.push(`up changed: ${await page.textContent('#status')}`);
 await page.screenshot({ path: `${out}/orient-4-up.png` });
 // place a design on the loaded scan to make sure mapping works on an imported mesh
-await page.evaluate(() => window.__app.changeOrientation((o) => { o.up = 'y'; o.turn = 0; }));
+// The synthetic file is Z-up (as photogrammetry exports often are): back to upright.
+await page.evaluate(() => window.__app.changeOrientation((o) => { o.up = 'z'; o.turn = 0; }));
 await page.waitForTimeout(1200);
+await page.evaluate(() => window.__app.closeBodyPanel()); // it opens when a scan loads and would offset the view
 await page.evaluate(() => window.__app.goTo('chest')); await page.waitForTimeout(900);
 const stage = await page.locator('#stage').boundingBox();
 logs.push(`placed on scan: ${await page.evaluate(([x, y]) => window.__app.placeTestAt(x, y), [stage.x + stage.width / 2, stage.y + stage.height / 2])}`);
