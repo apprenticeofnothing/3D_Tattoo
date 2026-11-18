@@ -14,6 +14,9 @@ import { MeasureOverlay } from './viewer/MeasureOverlay';
 import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles';
 import { TurntableRing } from './viewer/TurntableRing';
 import { wheelFactor } from './viewer/zoom';
+import { ExportDialog, type ExportChoice } from './ui/exportDialog';
+import { sourceImage, stencilPdf, stencilPng, stencilSvg } from './export/stencil';
+import { describeArea, describeRotation } from './export/placementText';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
@@ -572,6 +575,69 @@ function select(d: PlacedDesign | null) {
   panel.setDesigns(placed, d?.placement.id ?? null);
   updateGizmo();
   viewer.requestRender();
+  if (d) revealSelected();
+}
+
+/**
+ * If the design panel covers the selected design (or its handles and size
+ * tag), ease the view over just enough to show it, like scrolling it into
+ * view. Never while a finger or the mouse is still moving something, and
+ * never when it is already in the clear, so a tap is never followed by the
+ * body sliding away.
+ */
+let revealFrame = 0;
+function revealSelected() {
+  cancelAnimationFrame(revealFrame);
+  let tries = 0;
+  const check = () => {
+    if (!selected || drag || pinchStart || ++tries > 600) return;
+    if (anyBusy() || !viewer.isSettled()) { revealFrame = requestAnimationFrame(check); return; }
+    keepClearOfPanel(selected);
+  };
+  revealFrame = requestAnimationFrame(check);
+}
+
+function keepClearOfPanel(d: PlacedDesign) {
+  if (!surface || !d.result || compare || d.placement.hidden || bodyPanel?.open || posePanel?.open) return;
+  const pr = panel.el.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+  if (pr.width === 0 || pr.height === 0) return;
+  const pts = d.outline(surface, 0.01, display()).filter((p): p is [number, number, number] => !!p);
+  const h = d.handles(surface, display());
+  if (h.rotate) pts.push(h.rotate);
+  if (h.scale) pts.push(h.scale);
+  if (!pts.length) return;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of pts) { const s = toScreen(p); x0 = Math.min(x0, s.x); x1 = Math.max(x1, s.x); y0 = Math.min(y0, s.y); y1 = Math.max(y1, s.y); }
+  const M = 28; // handle radius and a little air
+  x0 -= M; x1 += M; y0 -= M; y1 += M;
+  if (!sizeTag.classList.contains('hidden')) {
+    // The size tag hangs below the design and can be wider than it.
+    const t = sizeTag.getBoundingClientRect();
+    x0 = Math.min(x0, t.left - 8); x1 = Math.max(x1, t.right + 8); y1 = Math.max(y1, t.bottom + 8);
+  }
+  if (x1 <= pr.left || y1 <= pr.top || x0 >= pr.right || y0 >= pr.bottom) return; // not covered
+  let dx = 0, dy = 0;
+  if (pr.width < sr.width * 0.9) {
+    // Side panel: move the design left into the space beside it.
+    const free0 = sr.left, free1 = pr.left;
+    dx = x1 - x0 <= free1 - free0 ? Math.max(free1 - x1, free0 - x0) : (free0 + free1) / 2 - (x0 + x1) / 2;
+    dx = Math.min(0, dx);
+  } else {
+    // Bottom sheet: move the design up into the space above it.
+    const free0 = sr.top, free1 = pr.top;
+    dy = y1 - y0 <= free1 - free0 ? Math.max(free1 - y1, free0 - y0) : (free0 + free1) / 2 - (y0 + y1) / 2;
+    dy = Math.min(0, dy);
+  }
+  if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+  const cam = viewer.camera, target = viewer.controls.target;
+  const c = new Vector3(...shown(d.placement.tri, d.placement.point));
+  const fwd = cam.getWorldDirection(new Vector3());
+  const mpp = viewer.metresPerPixel(Math.max(0.05, c.clone().sub(cam.position).dot(fwd)));
+  const right = new Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+  const up = new Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+  // Moving the camera right slides the picture left (and up slides it down).
+  const shift = right.multiplyScalar(-dx * mpp).add(up.multiplyScalar(dy * mpp));
+  viewer.flyTo({ position: cam.position.clone().add(shift), target: target.clone().add(shift) }, 450);
 }
 
 function updateGizmo() {
@@ -591,6 +657,7 @@ function changeSelected(patch: Partial<PlacementData>, doCommit: boolean) {
   if (needsGeometry) recompute(selected, doCommit); else { panel.show(selected); viewer.requestRender(); }
   if (!needsGeometry) panel.renderReadout(selected);
   if (doCommit) { panel.show(selected); commit(); }
+  if (doCommit && needsGeometry) revealSelected(); // a bigger design can reach under the panel
 }
 
 // ---------- History and persistence ----------
@@ -982,6 +1049,23 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     panel.show(selected);
     recompute(selected, false);
   },
+  onPinchStart() {
+    if (!selected) return;
+    pinchStart = { width: selected.placement.widthCm, rotation: selected.placement.rotation };
+  },
+  onPinchMove(scale, rotation) {
+    if (!selected || !pinchStart) return;
+    const p = selected.placement;
+    p.widthCm = Math.round(Math.min(150, Math.max(1, pinchStart.width * scale)) * 10) / 10;
+    const r = pinchStart.rotation - rotation; // turning the fingers clockwise turns the design clockwise
+    p.rotation = Math.atan2(Math.sin(r), Math.cos(r));
+    panel.show(selected);
+    recompute(selected, false);
+  },
+  onPinchEnd() {
+    pinchStart = null;
+    if (selected) { recompute(selected, true); commit(); revealSelected(); }
+  },
   onDragEnd(kind, cancelled) {
     if (kind === 'spin') { viewer.renderer.domElement.classList.remove('grabbing'); return; }
     if (kind === 'joint') {
@@ -994,6 +1078,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     recompute(selected, true);
     if (!cancelled) commit();
     panel.show(selected);
+    revealSelected();
   },
 });
 viewer.controls.addEventListener('change', () => { /* handles are sprites; nothing to do */ });
@@ -1019,6 +1104,165 @@ viewer.renderer.domElement.addEventListener('dblclick', (e) => {
   if (ringHit(e.clientX, e.clientY)) viewer.frameBody(heightM());
 });
 $('view-chips').querySelectorAll<HTMLButtonElement>('[data-yaw]').forEach((b) => b.addEventListener('click', () => viewer.viewFrom(Number(b.dataset.yaw), heightM())));
+
+// ---------- Size on the body ----------
+
+const sizeTag = document.createElement('div');
+sizeTag.className = 'size-tag hidden';
+stage.appendChild(sizeTag);
+const sizeText = (wCm: number, hCm: number) => `${wCm.toFixed(1)} × ${hCm.toFixed(1)} cm · ${(wCm / 2.54).toFixed(1)} × ${(hCm / 2.54).toFixed(1)} in`;
+
+/** Keep the size tag under the selected design as the view moves. */
+function positionSizeTag() {
+  if (!selected || !surface || !selected.result || compare || selected.placement.hidden || bodyPanel?.open || posePanel?.open) { sizeTag.classList.add('hidden'); return; }
+  const H = selected.heightM;
+  const p = selected.surfacePoint(surface, 0, -H / 2 - 0.006, 0.003, display());
+  if (!p) { sizeTag.classList.add('hidden'); return; }
+  const s = toScreen(p), r = stage.getBoundingClientRect();
+  sizeTag.style.left = `${s.x - r.left}px`;
+  sizeTag.style.top = `${s.y - r.top + 14}px`;
+  sizeTag.textContent = sizeText(selected.placement.widthCm, selected.result.heightCm);
+  sizeTag.classList.remove('hidden');
+}
+viewer.onAfterRender = positionSizeTag;
+
+let pinchStart: { width: number; rotation: number } | null = null;
+let resizeCommit = 0;
+/** Resize the selected design by a factor, live; the exact mapping and an undo step follow when it settles. */
+function resizeSelected(factor: number, settleMs = 300) {
+  if (!selected) return;
+  const p = selected.placement;
+  p.widthCm = Math.round(Math.min(150, Math.max(1, p.widthCm * factor)) * 10) / 10;
+  panel.show(selected);
+  recompute(selected, false);
+  window.clearTimeout(resizeCommit);
+  resizeCommit = window.setTimeout(() => { if (selected) { recompute(selected, true); commit(); } }, settleMs);
+}
+
+// ---------- Stencil export ----------
+
+const exportDialog = new ExportDialog(app);
+
+function openExport() {
+  if (!selected || !selected.result) { setStatus('Select a design first.'); return; }
+  const p = selected.placement;
+  const entry = designs.get(p.designId);
+  if (!entry) return;
+  const wMm = p.widthCm * 10, hMm = selected.result.heightCm * 10;
+  exportDialog.open(p.design.name.replace(/\.[a-z0-9]+$/i, ''), wMm, hMm, (c) => void runExport(c));
+}
+
+function placementLines(d: PlacedDesign): string[] {
+  const p = d.placement, r = d.result!;
+  const lines = [
+    `Size on the skin: ${p.widthCm.toFixed(1)} × ${r.heightCm.toFixed(1)} cm (${(p.widthCm / 2.54).toFixed(2)} × ${(r.heightCm / 2.54).toFixed(2)} in)`,
+    `Area: ${surface ? describeArea(surface, p.tri, p.point, heightM()) : 'unknown'}`,
+    `Centre of the design: ${(p.point[1] * 100).toFixed(0)} cm above the floor (body height ${heightCm} cm)`,
+    `Rotation: ${describeRotation(p.rotation)}`,
+  ];
+  if (builder && bodySource === 'builder' && surface?.labels) {
+    const j = builder.worldJoints();
+    const side = p.point[0] >= 0 ? 'L' : 'R';
+    const el = j[`lowerarm01.${side}____head`], wr = j[`wrist.${side}____head`];
+    const dist = (q: number[]) => Math.hypot(q[0] - p.point[0], q[1] - p.point[1], q[2] - p.point[2]) * 100;
+    const part = describeArea(surface, p.tri, p.point, heightM()).toLowerCase();
+    if (part.includes('forearm') || part.includes('upper arm')) lines.push(`Distance from the centre to the elbow joint about ${dist(el).toFixed(0)} cm, to the wrist joint about ${dist(wr).toFixed(0)} cm`);
+  }
+  if (p.wrap && r.circumferenceM) lines.push(`Wraps around the limb: circumference here ${(r.circumferenceM * 100).toFixed(1)} cm`);
+  if (p.mirror) lines.push('The design is shown mirrored on the body');
+  const s = r.summary, worst = Math.max(s.worstStretch, -s.worstCompression);
+  lines.push(worst > 0.05
+    ? `Fit: the skin curves enough that a flat stencil would ${s.worstCompression < -0.05 ? 'wrinkle' : 'stretch'} (up to ${(worst * 100).toFixed(0)}% on ${(s.areaOverThreshold * 100).toFixed(0)}% of the design)`
+    : `Fit: lies flat within ${(worst * 100).toFixed(1)}% on this spot`);
+  lines.push(`Body: ${bodyLabel}`);
+  return lines;
+}
+
+/**
+ * Camera for the placement picture: the same viewing angle as now, but aimed
+ * at the design and far enough back to show it with some body around it.
+ * If the design faces away from the current view, look straight at it.
+ */
+function placementCamera(d: PlacedDesign): { position: Vector3; target: Vector3 } | null {
+  if (!surface || !d.result) return null;
+  const p = d.placement;
+  const c = shown(p.tri, p.point);
+  const D = display(), I = surface.indices;
+  const a = I[p.tri * 3] * 3, b = I[p.tri * 3 + 1] * 3, k = I[p.tri * 3 + 2] * 3;
+  const A = new Vector3(D[a], D[a + 1], D[a + 2]);
+  const n = new Vector3(D[b], D[b + 1], D[b + 2]).sub(A).cross(new Vector3(D[k], D[k + 1], D[k + 2]).sub(A)).normalize();
+  const target = new Vector3(...c);
+  let dir = viewer.camera.position.clone().sub(viewer.controls.target).normalize(); // from the body towards the eye
+  if (dir.dot(n) < 0.3) dir = n.clone();
+  const size = Math.hypot(p.widthCm, d.result.heightCm) / 100;
+  const frame = Math.max(0.35, size * 2.6); // metres of body visible top to bottom
+  const dist = frame / 2 / Math.tan((viewer.camera.fov * Math.PI) / 360);
+  return { position: target.clone().addScaledVector(dir, dist), target };
+}
+
+async function snapshotJpeg(): Promise<{ jpeg: Uint8Array; widthPx: number; heightPx: number } | undefined> {
+  try {
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const was = helpers.map((g) => g.visible);
+    helpers.forEach((g) => { g.visible = false; });
+    const cam = selected ? placementCamera(selected) : null;
+    let png: Blob;
+    try { png = await (cam ? viewer.snapshotFrom(cam.position, cam.target) : viewer.screenshot()); } finally { helpers.forEach((g, i) => { g.visible = was[i]; }); viewer.requestRender(); }
+    const bmp = await createImageBitmap(png);
+    const c = document.createElement('canvas');
+    c.width = bmp.width; c.height = bmp.height;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = '#1b1d22'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, 0, 0);
+    const jpg = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('jpeg'))), 'image/jpeg', 0.9));
+    return { jpeg: new Uint8Array(await jpg.arrayBuffer()), widthPx: c.width, heightPx: c.height };
+  } catch { return undefined; }
+}
+
+/** 45 -> "45", 6.5 -> "6.5" (for file names). */
+const cmName = (mm: number) => String(Math.round(mm) / 10);
+
+async function runExport(c: ExportChoice) {
+  if (!selected || !selected.result) return;
+  const d = selected, p = d.placement;
+  const entry = designs.get(p.designId);
+  if (!entry) return;
+  const wMm = p.widthCm * 10, hMm = d.result!.heightCm * 10;
+  // The stencil matches what is on the skin: mirrored if the design is mirrored there, and again for transfer paper if asked.
+  const mirror = p.mirror !== c.mirror;
+  const base = `${entry.source.name.replace(/\.[a-z0-9]+$/i, '')}_${cmName(wMm)}x${cmName(hMm)}cm${c.mirror ? '_mirrored' : ''}`;
+  exportDialog.busy(true);
+  try {
+    let blob: Blob, name: string;
+    if (c.format === 'svg') {
+      blob = new Blob([stencilSvg(entry.source, wMm, hMm, mirror)], { type: 'image/svg+xml' });
+      name = `${base}.svg`;
+    } else {
+      const img = await sourceImage(entry.source);
+      if (c.format === 'png') {
+        blob = new Blob([await stencilPng(img, wMm, hMm, mirror) as BlobPart], { type: 'image/png' });
+        name = `${base}_300dpi.png`;
+      } else {
+        const snapshot = c.placement ? await snapshotJpeg() : undefined;
+        const pdf = await stencilPdf(img, { name: entry.source.name.replace(/\.[a-z0-9]+$/i, ''), widthMm: wMm, heightMm: hMm, mirror, placement: placementLines(d), snapshot }, c.paper, c.placement);
+        blob = new Blob([pdf as BlobPart], { type: 'application/pdf' });
+        name = `${base}_stencil.pdf`;
+      }
+    }
+    const file = new File([blob], name, { type: blob.type });
+    const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
+    if (nav.share && nav.canShare?.({ files: [file] }) && /iPhone|iPad|Android/i.test(navigator.userAgent)) {
+      try { await nav.share({ files: [file], title: name }); } catch { download(blob, name); }
+    } else download(blob, name);
+    setStatus(`Exported ${name}`);
+    exportDialog.close();
+  } catch (err) {
+    console.error(err);
+    setStatus(`Export failed: ${(err as Error).message}`);
+  } finally {
+    exportDialog.busy(false);
+  }
+}
 
 // ---------- Zoom ----------
 
@@ -1059,6 +1303,10 @@ stage.addEventListener('wheel', (e) => {
   if ((e.target as HTMLElement).closest('.panel, .body-panel, .sheet, .view-chips, .measure-bar')) return; // let panels scroll
   e.preventDefault();
   e.stopPropagation(); // OrbitControls would zoom to its target instead
+  if (e.altKey && selected && pickDesign(e.clientX, e.clientY) === selected) {
+    resizeSelected(1 / wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey));
+    return;
+  }
   viewer.zoomAt(zoomAnchor(e.clientX, e.clientY), wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey));
 }, { capture: true, passive: false });
 $('view-chips').querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((b) => b.addEventListener('click', () => zoomCentre(b.dataset.zoom === 'in' ? 0.7 : 1 / 0.7)));
@@ -1070,8 +1318,12 @@ const panel = new Panel(stage, {
   onChange: changeSelected,
   onDuplicate: duplicateSelected,
   onRemove: () => { if (selected) removeDesign(selected); },
+  onExport: () => openExport(),
 });
 if (window.innerWidth < 700) panel.setCollapsed(true);
+// Showing or expanding the design panel can cover the design: move it clear.
+let panelClass = panel.el.className;
+new MutationObserver(() => { if (panel.el.className !== panelClass) { panelClass = panel.el.className; revealSelected(); } }).observe(panel.el, { attributes: true, attributeFilter: ['class'] });
 
 function startPlacing(entry: DesignEntry) {
   pending = entry;
@@ -1202,6 +1454,7 @@ try {
   cameraElevation: () => { const o = viewer.camera.position.clone().sub(bodyCentre()); return Math.asin(o.y / o.length()) * 180 / Math.PI; },
   viewFrom: (yaw: number) => viewer.viewFrom(yaw, heightM()),
   zoomDistance: () => viewer.zoomDistance(),
+  openExport, runExport, sizeTagText: () => (sizeTag.classList.contains('hidden') ? null : sizeTag.textContent), placementLines: () => (selected ? placementLines(selected) : null),
   zoomSettled: () => viewer.isSettled(),
   cameraDistanceTo: (p: number[]) => viewer.camera.position.distanceTo(new Vector3(p[0], p[1], p[2])),
   pickAt: (x: number, y: number) => { const h = pickSurface(x, y); return h ? h.shown : null; },

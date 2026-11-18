@@ -72,6 +72,16 @@ both devices are on the same Wi-Fi.
   fingers on a phone, double-click or double-tap the body to zoom in
   there, − and + buttons, keys + and − (0 shows the whole body). Close
   enough to inspect fine lines (about 7 cm from the skin).
+- Sizing and stencil export: resize a design on the body by dragging the
+  yellow corner handle, by pinching it with two fingers on a phone, or
+  with Alt (Option) + scroll over it on a Mac. A tag under the design shows
+  its size along the skin in cm and inches as it changes. "Export
+  stencil" then saves the design at exactly that size, for the tattoo
+  artist: a print-ready PDF (A4 or US Letter, 100% scale, calibration
+  rulers, big pieces split over several pages with alignment crosses, an
+  optional placement page with a picture and the position on the body),
+  an SVG sized in millimetres, or a 300 dpi PNG. See
+  `docs/stencil-export.md`.
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

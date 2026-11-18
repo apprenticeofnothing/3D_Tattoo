@@ -42,18 +42,23 @@ await page.evaluate(() => window.__app.set((d) => { d.placement.hidden = true; d
 await idle(page);
 await page.evaluate(() => window.__app.goTo('forearm-inner-left')); await page.waitForTimeout(900);
 const tap = { x: cx - 30, y: cy + 10 };
+const want = await page.evaluate(([x, y]) => window.__app.pickAt(x, y), [tap.x, tap.y]);
 log(`placed posed: ${await page.evaluate(([x, y]) => window.__app.placeTestAt(x, y), [tap.x, tap.y])}`);
 await idle(page);
+const got = await page.evaluate(() => { const p = window.__app.selected().placement; return window.__app.shownPoint(p.tri, p.point); });
+log(`tap -> design centre is ${(Math.hypot(got[0] - want[0], got[1] - want[1], got[2] - want[2]) * 1000).toFixed(1)} mm from the tapped skin`);
+await page.waitForFunction(() => window.__app.zoomSettled()); // the view may ease the design clear of the panel
 const scr = await page.evaluate(() => { const p = window.__app.selected().placement; return window.__app.toScreen(window.__app.shownPoint(p.tri, p.point)); });
-log(`tap -> design centre on screen: off by ${Math.hypot(scr.x - tap.x, scr.y - tap.y).toFixed(1)} px`);
 
 // 4. Drag it on the posed arm.
 const from = scr;
 await page.mouse.move(from.x, from.y); await page.mouse.down();
 for (let i = 1; i <= 10; i++) { await page.mouse.move(from.x + 4 * i, from.y - 3 * i); await page.waitForTimeout(40); }
-await page.mouse.up(); await idle(page);
+await page.waitForFunction(() => !window.__app.busy()); await page.waitForTimeout(200);
 const scr2 = await page.evaluate(() => { const p = window.__app.selected().placement; return window.__app.toScreen(window.__app.shownPoint(p.tri, p.point)); });
-log(`drag by (40,-30) px: design centre moved (${(scr2.x - from.x).toFixed(0)}, ${(scr2.y - from.y).toFixed(0)}) px`);
+log(`drag by (40,-30) px: design centre moved (${(scr2.x - from.x).toFixed(0)}, ${(scr2.y - from.y).toFixed(0)}) px before letting go`);
+await page.mouse.up(); await idle(page);
+await page.waitForFunction(() => window.__app.zoomSettled()); // may ease clear of the panel after letting go
 await page.screenshot({ path: `${out}/ap-5-dragged.png` });
 
 // 5. Measure around the posed forearm.

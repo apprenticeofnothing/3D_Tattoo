@@ -22,6 +22,8 @@ export class Viewer {
   compareFilter: ((side: CompareSide) => void) | null = null;
   /** Split vertically (top/bottom) instead of left/right. Set for portrait screens. */
   compareStacked = false;
+  /** Called after every rendered frame (for HTML overlays that follow the scene). */
+  onAfterRender: (() => void) | null = null;
   private body: Object3D | null = null;
   private needsRender = true;
   private fly: { from: FlyTarget; to: FlyTarget; start: number; duration: number } | null = null;
@@ -223,6 +225,12 @@ export class Viewer {
     return (this.height + this.inset.bottom) / this.height;
   }
 
+  /** Metres per screen pixel at a given distance in front of the camera. */
+  metresPerPixel(depth: number): number {
+    const span = this.compareFilter ? this.height : this.height + this.inset.bottom;
+    return (2 * depth * Math.tan((this.camera.fov * Math.PI) / 360)) / Math.max(1, span);
+  }
+
   /** Aspect ratio of one viewport. */
   viewAspect(): number {
     if (!this.compareFilter) return Math.max(1, this.width - this.inset.right) / Math.max(1, this.height - this.inset.bottom);
@@ -236,6 +244,27 @@ export class Viewer {
   async screenshot(type = 'image/png'): Promise<Blob> {
     this.renderFrame();
     return new Promise((resolve, reject) => this.renderer.domElement.toBlob((b) => (b ? resolve(b) : reject(new Error('screenshot failed'))), type));
+  }
+
+  /**
+   * One picture from another camera position, without moving the view the
+   * person sees (the camera is put back before the next frame is shown).
+   */
+  async snapshotFrom(position: Vector3, target: Vector3, type = 'image/png'): Promise<Blob> {
+    const cam = this.camera, pos = cam.position.clone(), quat = cam.quaternion.clone(), inset = this.inset;
+    cam.position.copy(position); cam.lookAt(target); cam.updateMatrixWorld();
+    this.inset = { right: 0, bottom: 0 };
+    let shot: Promise<Blob>;
+    try {
+      this.renderFrame();
+      // toBlob copies the pixels straight away; the encoding finishes later.
+      shot = new Promise((resolve, reject) => this.renderer.domElement.toBlob((b) => (b ? resolve(b) : reject(new Error('snapshot failed'))), type));
+    } finally {
+      cam.position.copy(pos); cam.quaternion.copy(quat); cam.updateMatrixWorld();
+      this.inset = inset;
+      this.needsRender = true;
+    }
+    return shot;
   }
 
   private resize(): void {
@@ -307,6 +336,7 @@ export class Viewer {
     if (moved || this.needsRender) {
       this.renderFrame();
       this.needsRender = false;
+      this.onAfterRender?.();
     }
   }
 }

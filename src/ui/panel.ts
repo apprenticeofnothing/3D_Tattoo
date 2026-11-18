@@ -4,12 +4,18 @@
 import type { Option, PlacementData, ViewMode } from '../app/project';
 import type { PlacedDesign } from '../mapping/placements';
 
+/** How to resize besides the corner handle, for the kind of screen in use. */
+const RESIZE_HINT = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches
+  ? ' or pinch it with two fingers'
+  : ' or hold Alt (Option on a Mac) and scroll over the design';
+
 export interface PanelCallbacks {
   onSelect(id: string): void;
   /** Change fields of the selected placement. `commit` true = add an undo step. */
   onChange(patch: Partial<PlacementData>, commit: boolean): void;
   onDuplicate(): void;
   onRemove(): void;
+  onExport(): void;
 }
 
 export class Panel {
@@ -59,6 +65,7 @@ export class Panel {
           <button class="btn seg-btn" data-option="B">B</button>
           <button class="btn seg-btn" data-option="both">Both</button>
         </div>
+        <button id="p-export" class="btn primary">Export stencil</button>
         <button id="p-hide" class="btn toggle">Hide design</button>
         <button id="p-dup" class="btn">Duplicate</button>
         <button id="p-remove" class="btn danger">Remove</button>
@@ -88,6 +95,7 @@ export class Panel {
     this.opacity.addEventListener('change', () => cb.onChange({ opacity: Number(this.opacity.value) }, true));
     q('p-hide').addEventListener('click', () => { if (this.current) cb.onChange({ hidden: !this.current.placement.hidden }, true); });
     q('p-dup').addEventListener('click', () => cb.onDuplicate());
+    q('p-export').addEventListener('click', () => cb.onExport());
     q('p-remove').addEventListener('click', () => cb.onRemove());
   }
 
@@ -135,13 +143,13 @@ export class Panel {
     const r = d.result;
     const p = d.placement;
     if (!r) { this.readout.textContent = 'Computing…'; return; }
-    this.heightLabel.textContent = `× ${r.heightCm.toFixed(1)} cm`;
+    this.heightLabel.textContent = `× ${r.heightCm.toFixed(1)} cm (${(p.widthCm / 2.54).toFixed(1)} × ${(r.heightCm / 2.54).toFixed(1)} in)`;
     const s = r.summary;
     const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
     const worst = Math.max(s.worstStretch, -s.worstCompression);
     const cls = worst > 0.05 ? 'warn' : 'ok';
     const parts = [
-      `<b>${p.design.name}</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin`,
+      `<b>${p.design.name}</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin. Resize with the yellow corner handle${RESIZE_HINT}.`,
       `<span class="${cls}">Stretch up to ${pct(s.worstStretch)}, compression up to ${pct(-s.worstCompression)}; ${pct(s.areaOverThreshold)} of the design beyond 5%</span>`,
     ];
     if (worst > 0.05) parts.push(`<span class="warn">A paper stencil would ${s.worstCompression < -0.05 ? 'wrinkle' : 'tear'} there. Consider a smaller design or a flatter spot.</span>`);

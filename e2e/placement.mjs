@@ -33,6 +33,7 @@ async function desktop() {
   await page.waitForTimeout(900);
   log(`placed: ${await page.evaluate(([x, y]) => window.__app.placeTestAt(x, y), [cx, cy])}`);
   await idle(page);
+  await page.waitForFunction(() => window.__app.zoomSettled()); // the view may ease the design clear of the panel
   await page.screenshot({ path: `${out}/p3-1-placed.png` });
   const s0 = await sel(page);
 

@@ -24,6 +24,8 @@ async function run(name, ctxOpts) {
   logs.push(`[${name}] placed on forearm: ${ok}`);
   await waitIdle(page);
   await page.screenshot({ path: `${out}/${name}-forearm-stencil.png` });
+  // On a phone the design panel starts folded away: open it.
+  if (await page.locator('.panel.collapsed').count()) { await page.click('#p-collapse'); await waitIdle(page); }
   logs.push(`[${name}] readout: ${(await page.textContent('#p-readout')).replace(/\s+/g, ' ')}`);
   await page.click('.seg-btn[data-mode="heatmap"]'); await page.waitForTimeout(500);
   await page.screenshot({ path: `${out}/${name}-forearm-heat.png` });

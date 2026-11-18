@@ -132,3 +132,11 @@ input[type=range] { width: 140px; min-height: var(--tap); accent-color: var(--ac
 #stage canvas.grabbing { cursor: grabbing; }
 .view-chips .vc-sep { width: 1px; background: #444a57; margin: 6px 2px; }
 .view-chips [data-zoom] { min-width: 40px; padding: 0; font-size: 20px; }
+.export-sheet .sheet-body { display: flex; flex-direction: column; gap: 6px; }
+.ex-size { margin: 4px 2px 6px; font-size: 15px; }
+.ex-check { display: flex; align-items: center; gap: 8px; min-height: 44px; flex-wrap: wrap; }
+.ex-check input { width: 22px; height: 22px; accent-color: var(--accent); }
+.ex-check small { flex-basis: 100%; margin-left: 30px; margin-top: -8px; }
+.ex-go { margin-top: 8px; }
+.size-tag { position: absolute; z-index: 3; transform: translate(-50%, 0); pointer-events: none; white-space: nowrap;
+  padding: 4px 10px; border-radius: 999px; background: rgba(11,18,32,.85); color: #fff; font-size: 13px; font-weight: 600; }

@@ -66,10 +66,12 @@ for (const [label, want] of [['Back', 180], ['Left', 90], ['Right', -90], ['Fron
 await page.click('#view-chips >> text=Left'); await page.waitForTimeout(900);
 const st = await page.locator('#stage').boundingBox();
 const tap = { x: st.x + st.width / 2, y: st.y + st.height * 0.38 };
+const want = await page.evaluate(([x, y]) => window.__app.pickAt(x, y), [tap.x, tap.y]);
 log(`placed on turned body: ${await page.evaluate(([x, y]) => window.__app.placeTestAt(x, y), [tap.x, tap.y])}`);
 await page.waitForFunction(() => !window.__app.busy()); await page.waitForTimeout(300);
-const c = await page.evaluate(() => { const p = window.__app.selected().placement; return window.__app.toScreen(window.__app.shownPoint(p.tri, p.point)); });
-log(`tap -> design centre off by ${Math.hypot(c.x - tap.x, c.y - tap.y).toFixed(1)} px`);
+const got = await page.evaluate(() => { const p = window.__app.selected().placement; return window.__app.shownPoint(p.tri, p.point); });
+log(`tap -> design centre is ${(Math.hypot(got[0] - want[0], got[1] - want[1], got[2] - want[2]) * 1000).toFixed(1)} mm from the tapped skin`);
+await page.waitForFunction(() => window.__app.zoomSettled());
 await page.screenshot({ path: `${out}/tb-5-design-side.png` });
 await page.click('#btn-pose'); await page.waitForTimeout(400);
 const w0 = await page.evaluate(() => window.__app.jointScreen('left', 'wrist'));
