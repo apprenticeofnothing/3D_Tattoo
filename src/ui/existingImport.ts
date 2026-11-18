@@ -264,7 +264,7 @@ export class ExistingImport {
   private applyAnalysis(a: ImportAnalysis | null) {
     this.analysis = a;
     (this.el.querySelector('.ex-closeup') as HTMLElement).classList.toggle('hidden', !a?.wide || !a.regionId);
-    if (!a) { this.setStatus('No body found in the photo: choose where it is below.'); this.updateWidthTip(); return; }
+    if (!a) { this.setStatus('Choose below where on the body it is.'); this.updateWidthTip(); return; }
     if (!this.touched) {
       if (a.personMask && this.photo) {
         const g = autoGuides(this.photo, a.personMask, this.focus);
@@ -433,7 +433,7 @@ export class ExistingImport {
       const top = this.toScreen(f.at(0).c);
       ctx.fillStyle = '#fff'; ctx.font = '600 13px system-ui, sans-serif'; ctx.textAlign = 'center';
       const dir = { x: -f.u.x, y: -f.u.y };
-      ctx.fillText('▲ body end', top.x + dir.x * 22, top.y + dir.y * 22 + 4);
+      ctx.fillText('▲ body end', top.x + dir.x * 34, top.y + dir.y * 34 + 4);
     } else {
       ctx.strokeStyle = '#ffb35c';
       ctx.beginPath(); poly.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath(); ctx.stroke();
@@ -625,7 +625,8 @@ export class ExistingImport {
     this.setStatus('Flattening…');
     await new Promise((r) => setTimeout(r, 20));
     try {
-      const flat = flattenTattoo(this.masked?.full ?? this.photo, this.params(1));
+      // 1400 px keeps fine lines (about 7 px per mm on a 20 cm tattoo) and the autosave small.
+      const flat = flattenTattoo(this.masked?.full ?? this.photo, { ...this.params(1), maxSide: 1400 });
       if (flat.empty) { this.setStatus('No ink found inside the guides. Move them around the tattoo or lower "Remove skin texture".'); return; }
       const typed = Number(this.widthIn.value);
       const res: ImportResult = {

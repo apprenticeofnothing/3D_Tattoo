@@ -59,3 +59,11 @@ photo is blurry and retake it; never change zoom or exposure.
 Record a slow 4K video walkaround instead (stabilisation off, same
 rings), about one minute. Frames are extracted on the Mac. Expect lower
 quality than stills.
+
+## Existing tattoos
+
+To add tattoos you already have, see the photo tips in
+`docs/existing-tattoos.md` (straight on, 30 to 50 cm, limb held away
+from the body, plus one photo showing shoulders and hips so the app can
+find where the tattoo is). With a textured body scan, tattoos in it can
+be picked up directly instead.

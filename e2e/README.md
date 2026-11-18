@@ -19,6 +19,8 @@ node e2e/arm-pose.mjs /tmp/shots             # arm poses, designs riding on the 
 node e2e/joint-drag.mjs /tmp/shots           # grab wrist/elbow rings and move the arm (mouse and touch)
 node e2e/turn-body.mjs /tmp/shots            # turn and tilt the body with the floor ring, view buttons
 node e2e/stencil-export.mjs /tmp/shots       # resize on the body, export PDF/SVG/PNG and check their sizes (needs python3 with pypdf and Pillow)
+npx vite-node e2e/make-textured-scan.ts /tmp/tscan   # synthetic textured scan (cylinder with an 8 cm disk)
+node e2e/existing-tattoo.mjs /tmp/shots /tmp/tscan   # existing tattoos from photos and a scan, cover-up check (needs the pose model)
 node e2e/zoom.mjs /tmp/shots                 # wheel, trackpad pinch, buttons, keys, double-click, phone pinch
 ```
 

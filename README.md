@@ -22,7 +22,7 @@ Environments, github-pages.
 On the Mac:
 
 ```sh
-npm install
+npm install        # also fetches the pose model into public/mediapipe (once)
 npm run dev        # prints a local URL and a LAN URL for the phone
 npm test           # unit tests
 npm run build      # static site in dist/
@@ -82,6 +82,13 @@ both devices are on the same Wi-Fi.
   optional placement page with a picture and the position on the body),
   an SVG sized in millimetres, or a 300 dpi PNG. See
   `docs/stencil-export.md`.
+- Existing tattoos: add a tattoo you already have from a photo (flattened
+  around the arm or leg with perspective correction, ink separated from
+  the skin), from a photo showing your body (tap the tattoo and the app
+  says and shows where it is), or straight from your textured scan.
+  Cover-up check: how much of the old tattoo a new design hides, what
+  would show through, and the size that covers it. See
+  `docs/existing-tattoos.md`.
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

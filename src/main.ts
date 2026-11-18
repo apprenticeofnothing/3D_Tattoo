@@ -1609,7 +1609,7 @@ async function pickUpFromScan(hit: SkinHit) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const patch = computeExpMap(surface, { tri: hit.tri, point: hit.point, normal, tangent }, { radius: half * 1.45, exact: true, smoothPasses: 3 });
     const loc = new PatchLocator(surface, patch);
-    const px = Math.min(1600, Math.round(half * 2 * 8000)); // about 8 pixels per mm
+    const px = Math.min(1400, Math.round(half * 2 * 8000)); // about 8 pixels per mm (less for big ones)
     const flat = renderSkin((u, v) => loc.locateTri(u, v), tex, half * 2, px);
     const ink = extractInk(flat);
     keepCentralInk(ink);
