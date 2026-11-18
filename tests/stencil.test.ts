@@ -67,9 +67,26 @@ describe('stencil files', () => {
     const png = pngWithDpi(tinyPng(), 300);
     expect(pngDpi(png)).toBeCloseTo(300, 0);
     expect(pngDpi(pngWithDpi(png, 600))).toBeCloseTo(600, 0); // replaced, not duplicated
-    let ok = true;
-    try { execFileSync('python3', ['-I', '-c', 'import sys,io; from PIL import Image; im=Image.open(io.BytesIO(sys.stdin.buffer.read())); im.load(); print(im.info.get("dpi"))'], { input: Buffer.from(png) }); } catch { ok = false; }
-    expect(ok).toBe(true);
+    // Every chunk keeps a valid length and CRC, and the file still ends with IEND.
+    const dv = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    let at = 8; const types: string[] = [];
+    while (at < png.length) {
+      const len = dv.getUint32(at);
+      const type = String.fromCharCode(...png.subarray(at + 4, at + 8));
+      expect(dv.getUint32(at + 8 + len) >>> 0).toBe(crc32(png.subarray(at + 4, at + 8 + len)) >>> 0);
+      types.push(type); at += 12 + len;
+    }
+    expect(at).toBe(png.length);
+    expect(types[0]).toBe('IHDR');
+    expect(types[types.length - 1]).toBe('IEND');
+    expect(types.filter((t) => t === 'pHYs').length).toBe(1);
+    // Cross-check with Pillow when it is installed (not on the CI runner).
+    let havePil = true;
+    try { execFileSync('python3', ['-I', '-c', 'import PIL'], { stdio: 'ignore' }); } catch { havePil = false; }
+    if (havePil) {
+      const out = execFileSync('python3', ['-I', '-c', 'import sys,io; from PIL import Image; im=Image.open(io.BytesIO(sys.stdin.buffer.read())); im.load(); print(round(im.info.get("dpi")[0]))'], { input: Buffer.from(png) }).toString().trim();
+      expect(out).toBe('300');
+    }
   });
 
   it('gives an SVG design exact millimetre dimensions and can mirror it', () => {
