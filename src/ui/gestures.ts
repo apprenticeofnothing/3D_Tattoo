@@ -26,6 +26,8 @@ export interface GestureHandlers {
   onCameraZoom?(factor: number, anchorX: number, anchorY: number, first: boolean): void;
   /** Two fingers moving together: pan the view by this many pixels. */
   onCameraPan?(dx: number, dy: number): void;
+  /** The two-finger camera gesture ended (what it turned out to be). */
+  onCameraEnd?(mode: 'zoom' | 'pan' | null): void;
 }
 
 export function attachGestures(canvas: HTMLElement, controls: { enabled: boolean }, h: GestureHandlers): void {
@@ -116,7 +118,7 @@ export function attachGestures(canvas: HTMLElement, controls: { enabled: boolean
 
   const up = (e: PointerEvent) => {
     active.delete(e.pointerId);
-    if (cam && (e.pointerId === cam.a || e.pointerId === cam.b)) cam = null;
+    if (cam && (e.pointerId === cam.a || e.pointerId === cam.b)) { h.onCameraEnd?.(cam.mode); cam = null; }
     if (pinch && (e.pointerId === pinch.a || e.pointerId === pinch.b)) {
       pinch = null;
       h.onPinchEnd?.();
@@ -135,7 +137,7 @@ export function attachGestures(canvas: HTMLElement, controls: { enabled: boolean
   canvas.addEventListener('pointerup', up, { capture: true });
   canvas.addEventListener('pointercancel', (e) => {
     active.delete(e.pointerId);
-    if (cam && (e.pointerId === cam.a || e.pointerId === cam.b)) cam = null;
+    if (cam && (e.pointerId === cam.a || e.pointerId === cam.b)) { h.onCameraEnd?.(cam.mode); cam = null; }
     if (pinch && (e.pointerId === pinch.a || e.pointerId === pinch.b)) { pinch = null; h.onPinchEnd?.(); controls.enabled = true; return; }
     if (primary && e.pointerId === primary.id) endDrag(true);
   }, { capture: true });

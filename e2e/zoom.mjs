@@ -75,11 +75,21 @@ log(`double-click on the body: distance ${before.toFixed(2)} -> ${(await page.ev
 await page.screenshot({ path: `${out}/zm-3-dblclick.png` });
 
 // 6. Phone: two-finger pinch.
-const phone = await (await browser.newContext({ ...devices['iPhone 15'], deviceScaleFactor: 1, hasTouch: true })).newPage();
+// A real iPhone screen: 3 device pixels per CSS pixel (a 1x phone hid a bug
+// that drew everything 2x too large on high-density screens).
+const phone = await (await browser.newContext({ ...devices['iPhone 15'], viewport: { width: 393, height: 750 }, hasTouch: true })).newPage();
 await phone.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
 await ready(phone);
 await phone.evaluate(() => { window.__app.closeBodyPanel(); window.__app.viewFrom(0); });
 await phone.waitForTimeout(1200);
+await phone.waitForFunction(() => window.__app.zoomSettled(), null, { timeout: 10000 });
+await phone.waitForTimeout(300);
+{
+  const want = await phone.evaluate(() => window.__app.bodyScreenBox());
+  const got = await phone.evaluate(() => window.__app.renderedSkinBox());
+  const off = Math.max(Math.abs(got.x0 - want.x0), Math.abs(got.y0 - want.y0), Math.abs(got.x1 - want.x1), Math.abs(got.y1 - want.y1));
+  log(`phone at ${got.pixelRatio.toFixed(0)}x pixels: the body is drawn where taps expect it (box edges within ${off.toFixed(1)} px; whole body ${(want.y1 - want.y0).toFixed(0)} px tall on a ${await phone.evaluate(() => document.getElementById('stage').clientHeight)} px stage)`);
+}
 const pd0 = await phone.evaluate(() => window.__app.zoomDistance());
 const cdp = await phone.context().newCDPSession(phone);
 const c = { x: 196, y: 300 };

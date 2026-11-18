@@ -38,6 +38,10 @@ export class Viewer {
   /** Screen space covered by side or bottom panels; the view is centred in what remains. */
   private inset = { right: 0, bottom: 0 };
   private bounds: { min: Vector3; max: Vector3 } | null = null;
+  /** The whole-body view the camera is in (side and body height), until the view is moved by hand. */
+  private home: { yaw: number; height: number } | null = null;
+  /** Furthest the camera may be from what it looks at: a little beyond the whole-body view. */
+  private maxOut = Viewer.MAX_ZOOM_OUT;
   private hemi!: HemisphereLight; private key!: DirectionalLight; private fill!: DirectionalLight; private ambient!: AmbientLight;
 
   /**
@@ -74,9 +78,14 @@ export class Viewer {
     // Two fingers are handled by the app (pinch to zoom about where the
     // fingers landed, or drag to pan; never both at once), not here.
     this.controls.touches = { ONE: TOUCH.ROTATE, TWO: -1 as unknown as TOUCH };
-    // Never tip over the top of the head or under the feet.
-    this.controls.minPolarAngle = (10 * Math.PI) / 180;
-    this.controls.maxPolarAngle = (170 * Math.PI) / 180;
+    // Look down at the shoulders (up to 75 degrees) or up from below (45),
+    // never over the top of the head or from right underneath.
+    this.controls.minPolarAngle = (15 * Math.PI) / 180;
+    this.controls.maxPolarAngle = (135 * Math.PI) / 180;
+    // Turning the view by hand ends "whole body" framing (it then stays put on resize).
+    let startPos: Vector3 | null = null;
+    this.controls.addEventListener('start', () => { startPos = this.camera.position.clone(); });
+    this.controls.addEventListener('end', () => { if (startPos && startPos.distanceToSquared(this.camera.position) > 1e-8) this.home = null; startPos = null; });
     this.controls.target.set(0, 1.0, 0);
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
@@ -126,8 +135,9 @@ export class Viewer {
    */
   zoomAt(anchor: Vector3, factor: number): void {
     this.fly = null;
+    this.home = null;
     const from = this.zoomGoal ?? { camera: this.camera.position.clone(), target: this.controls.target.clone() };
-    const r = zoomTowards(from.camera, from.target, anchor, factor, Viewer.MIN_DIST, Viewer.MAX_ZOOM_OUT);
+    const r = zoomTowards(from.camera, from.target, anchor, factor, Viewer.MIN_DIST, this.maxOut);
     // Slide the orbit target along the line of sight to the depth of the
     // zoomed spot: the view is unchanged, orbiting then pivots around that
     // spot, and the orbit control's minimum distance never fights the zoom.
@@ -163,6 +173,7 @@ export class Viewer {
   /** Slide the view by a screen distance (two-finger drag): the body follows the fingers. */
   panBy(dxPx: number, dyPx: number): void {
     this.fly = null;
+    this.home = null;
     if (this.zoomGoal) { this.camera.position.copy(this.zoomGoal.camera); this.controls.target.copy(this.zoomGoal.target); this.zoomGoal = null; }
     const cam = this.camera, tgt = this.controls.target;
     cam.updateMatrixWorld();
@@ -184,6 +195,7 @@ export class Viewer {
   /** Smoothly move the camera. */
   flyTo(to: FlyTarget, duration = 650): void {
     this.zoomGoal = null;
+    this.home = null;
     this.fly = {
       from: { target: this.controls.target.clone(), position: this.camera.position.clone() },
       to: { target: to.target.clone(), position: to.position.clone() },
@@ -201,6 +213,7 @@ export class Viewer {
    */
   spin(dYaw: number, dPitch: number, center: Vector3): void {
     this.fly = null;
+    this.home = null;
     if (this.zoomGoal) { this.camera.position.copy(this.zoomGoal.camera); this.controls.target.copy(this.zoomGoal.target); this.zoomGoal = null; }
     const cam = this.camera.position, tgt = this.controls.target;
     if (dYaw) {
@@ -213,8 +226,8 @@ export class Viewer {
       const right = new Vector3().crossVectors(new Vector3(0, 1, 0), off).normalize();
       if (right.lengthSq() > 0) {
         const elev = Math.asin(Math.min(1, Math.max(-1, off.y / off.length())));
-        const limit = (80 * Math.PI) / 180;
-        const want = Math.min(limit, Math.max(-limit, elev + dPitch));
+        // Same range as turning with a finger: 75 degrees looking down, 45 looking up.
+        const want = Math.min((75 * Math.PI) / 180, Math.max((-45 * Math.PI) / 180, elev + dPitch));
         const q = new Quaternion().setFromAxisAngle(right, -(want - elev));
         cam.sub(center).applyQuaternion(q).add(center);
         tgt.sub(center).applyQuaternion(q).add(center);
@@ -225,20 +238,7 @@ export class Viewer {
   }
 
   /** Whole-body view from a side: 0 front, 90 the body's left, 180 back, 270 right. */
-  viewFrom(yawDeg: number, height: number): void {
-    const target = new Vector3(0, height * 0.5, 0);
-    const b = this.compareFilter ? 0 : this.inset.bottom;
-    const vFactor = (this.height + b) / Math.max(1, this.height - b);
-    const dist = ((height * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360)) * vFactor;
-    const aspect = this.viewAspect();
-    const aspectFix = aspect < 0.75 ? 1 / aspect * 0.75 : 1;
-    const a = (yawDeg * Math.PI) / 180;
-    const r = dist * aspectFix;
-    this.flyTo({ target, position: new Vector3(Math.sin(a) * r, height * 0.52, Math.cos(a) * r) });
-  }
-
-  /** Front view of the whole body of the given height. */
-  frameBody(height: number): void {
+  viewFrom(yawDeg: number, height: number, animate = true): void {
     const target = new Vector3(0, height * 0.5, 0);
     // With a bottom panel the vertical field of view is spread over a taller
     // virtual frame; back off so the whole body fits in the uncovered part.
@@ -247,7 +247,30 @@ export class Viewer {
     const dist = ((height * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360)) * vFactor;
     const aspect = this.viewAspect();
     const aspectFix = aspect < 0.75 ? 1 / aspect * 0.75 : 1;
-    this.flyTo({ target, position: new Vector3(0, height * 0.52, dist * aspectFix) });
+    const a = (yawDeg * Math.PI) / 180;
+    const r = dist * aspectFix;
+    const position = new Vector3(Math.sin(a) * r, height * 0.52, Math.cos(a) * r);
+    // Zooming out stops a little beyond this view: the body never shrinks to a speck.
+    this.maxOut = Math.max(1, position.distanceTo(target) * 1.6);
+    this.controls.maxDistance = this.maxOut;
+    if (animate) this.flyTo({ target, position });
+    else {
+      this.fly = null; this.zoomGoal = null;
+      this.camera.position.copy(position); this.controls.target.copy(target);
+      this.controls.update();
+      this.needsRender = true;
+    }
+    this.home = { yaw: yawDeg, height };
+  }
+
+  /** Front view of the whole body of the given height. */
+  frameBody(height: number): void { this.viewFrom(0, height); }
+
+  /** Make the view turn around this point (on the line of sight: the picture does not change). */
+  setPivot(p: Vector3): void {
+    this.controls.target.copy(p);
+    this.controls.update();
+    this.needsRender = true;
   }
 
   requestRender(): void { this.needsRender = true; }
@@ -317,12 +340,17 @@ export class Viewer {
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.needsRender = true;
+    // Still showing the whole body: fit it to the new size (phone toolbars
+    // appearing, the phone turned), instead of leaving it cut off or tiny.
+    if (this.home) this.viewFrom(this.home.yaw, this.home.height, false);
   }
 
   private renderFrame(): void {
     const r = this.renderer;
-    const pr = r.getPixelRatio();
-    const W = Math.floor(this.width * pr), H = Math.floor(this.height * pr);
+    // Viewport and scissor rectangles are in CSS pixels: the renderer applies
+    // the device pixel ratio itself. (Passing device pixels drew the scene
+    // 2-3x too large on high-density screens: iPhones, Retina Macs.)
+    const W = this.width, H = this.height;
     if (!this.compareFilter) {
       r.setScissorTest(false);
       r.setViewport(0, 0, W, H);

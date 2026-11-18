@@ -48,7 +48,7 @@ await page.screenshot({ path: `${out}/tb-3-tilted.png` });
 // Tilt is limited.
 const f3 = await page.evaluate(() => window.__app.ringScreen(0));
 await drag(page, f3, { x: f3.x, y: f3.y + 600 }, 30);
-log(`tilt limit: elevation ${(await elev()).toFixed(0)} degrees (max 80)`);
+log(`tilt limit: elevation ${(await elev()).toFixed(0)} degrees (max 75)`);
 
 // 4. Double-click the ring: back to the front.
 const f4 = await page.evaluate(() => window.__app.ringScreen(0));

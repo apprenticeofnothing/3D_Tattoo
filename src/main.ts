@@ -361,6 +361,18 @@ function closeBodyPanel() {
   if (!posePanel?.open) stage.classList.remove('body-open');
   $('btn-shape').classList.remove('active');
   updateViewInsets();
+  showNavigationTip();
+}
+
+/** How to look around, said once per visit in the status line (the app should never need a manual). */
+let navTipShown = false;
+function showNavigationTip() {
+  if (navTipShown) return;
+  navTipShown = true;
+  const touch = matchMedia('(pointer: coarse)').matches;
+  setStatus(touch
+    ? 'One finger turns the body · pinch to zoom · two fingers move it · double-tap to zoom in, double-tap the background for the whole body'
+    : 'Drag to turn the body · scroll to zoom · right-drag to move · double-click to zoom in, double-click the background for the whole body');
 }
 
 function showPlaceholder() {
@@ -1016,11 +1028,11 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
       if (nearHandle(x, y, h.scale)) return 'scale';
     }
     if (pending || pickingFromScan) return null; // placing: let taps through, camera otherwise
+    // Tap a design to select it; only the selected one moves when dragged.
+    // Dragging anything else turns the view, so looking around never moves
+    // a design by accident (the tap itself selects, see onTap).
     const d = pickDesign(x, y);
-    if (d) {
-      if (d !== selected) select(d);
-      return isLocked(d) ? null : 'move'; // a locked tattoo is selected, the drag turns the view
-    }
+    if (d && d === selected && !isLocked(d)) return 'move';
     return null;
   },
   onTap(x, y) {
@@ -1144,6 +1156,15 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     viewer.zoomAt(pinchAnchor, factor);
   },
   onCameraPan(dx, dy) { viewer.panBy(dx, dy); },
+  onCameraEnd(mode) {
+    // After a pan, turn around the skin now in the middle of the view (as
+    // other 3D viewers do), not around a point the pan left behind.
+    if (mode !== 'pan') return;
+    const s = toScreen(viewer.controls.target.toArray() as [number, number, number]);
+    raycaster.setFromCamera(ndcAt(s.x, s.y), viewer.camera);
+    const hit = raycaster.intersectObjects(viewer.bodyMeshes(), false)[0];
+    if (hit) viewer.setPivot(hit.point);
+  },
   onPinchEnd() {
     pinchStart = null;
     if (selected) { recompute(selected, true); commit(); revealSelected(); }
@@ -2048,6 +2069,31 @@ try {
     if (p.mirror) cu = -cu;
     const inkCentre = d.surfacePoint(surface, cu, cv, 0, display()) ?? shown(p.tri, p.point);
     return { area, spread, red, centre: inkCentre, anchor: shown(p.tri, p.point), widthCm: p.widthCm, heightCm: d.result.heightCm, id: p.id };
+  },
+  /** Where the body should appear on screen (projected vertices), in page pixels. */
+  bodyScreenBox: () => {
+    const D = display();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < D.length; i += 3 * 7) {
+      const s = toScreen([D[i], D[i + 1], D[i + 2]]);
+      x0 = Math.min(x0, s.x); y0 = Math.min(y0, s.y); x1 = Math.max(x1, s.x); y1 = Math.max(y1, s.y);
+    }
+    return { x0, y0, x1, y1 };
+  },
+  /** Where skin-coloured pixels actually are in the rendered picture, in page pixels. */
+  renderedSkinBox: async () => {
+    const blob = await viewer.screenshot();
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+    const ctx = c.getContext('2d', { willReadFrequently: true })!; ctx.drawImage(bmp, 0, 0);
+    const px = ctx.getImageData(0, 0, c.width, c.height).data;
+    const rect = viewer.renderer.domElement.getBoundingClientRect(), k = rect.width / c.width;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let y = 0; y < c.height; y += 2) for (let x = 0; x < c.width; x += 2) {
+      const i = (y * c.width + x) * 4;
+      if (px[i] > 110 && px[i] > px[i + 2] + 35 && px[i + 1] > 60) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    }
+    return { x0: rect.left + x0 * k, y0: rect.top + y0 * k, x1: rect.left + x1 * k, y1: rect.top + y1 * k, pixelRatio: 1 / k };
   },
   cameraState: () => ({ pos: viewer.camera.position.toArray(), target: viewer.controls.target.toArray(), height: heightM() }),
   cameraDir: () => { const v = new Vector3(); viewer.camera.getWorldDirection(v); return [v.x, v.y, v.z]; },
