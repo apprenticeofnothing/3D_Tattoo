@@ -79,14 +79,23 @@ const phone = await (await browser.newContext({ ...devices['iPhone 15'], deviceS
 await phone.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
 await ready(phone);
 await phone.evaluate(() => { window.__app.closeBodyPanel(); window.__app.openPosePanel(); });
-await phone.waitForTimeout(700);
-const pw0 = await phone.evaluate(() => window.__app.jointScreen('left', 'wrist'));
+// Let the camera finish framing the body above the panel: the flight starts
+// on the next frame, so wait a moment, then until the ring stops moving.
+await phone.waitForTimeout(800);
+let pw0 = await phone.evaluate(() => window.__app.jointScreen('left', 'wrist'));
+for (let i = 0; i < 40; i++) {
+  await phone.waitForTimeout(100);
+  const p = await phone.evaluate(() => window.__app.jointScreen('left', 'wrist'));
+  const still = Math.hypot(p.x - pw0.x, p.y - pw0.y) < 0.5;
+  pw0 = p;
+  if (still) break;
+}
 // Touch drag via CDP touch events.
 const cdp = await phone.context().newCDPSession(phone);
 await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: pw0.x, y: pw0.y }] });
 for (let i = 1; i <= 12; i++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: pw0.x - 3 * i, y: pw0.y - 6 * i }] }); await phone.waitForTimeout(30); }
 await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 await phone.waitForTimeout(400);
-log(`phone touch drag: left pose ${JSON.stringify(await phone.evaluate(() => window.__app.builderState().pose.left ?? null), (k, v) => typeof v === 'number' ? Math.round(v) : v)}`);
+log(`phone touch drag: left pose ${JSON.stringify(await phone.evaluate(() => window.__app.builderState().pose?.left ?? null), (k, v) => typeof v === 'number' ? Math.round(v) : v)}`);
 await phone.screenshot({ path: `${out}/jd-phone.png` });
 await browser.close();

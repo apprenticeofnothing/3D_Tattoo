@@ -5,7 +5,7 @@
 
 import {
   AmbientLight, Color, DirectionalLight, GridHelper, HemisphereLight, Mesh, Object3D,
-  PerspectiveCamera, Scene, Vector3, Vector4, WebGLRenderer,
+  PerspectiveCamera, Quaternion, Scene, Vector3, Vector4, WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
@@ -64,12 +64,18 @@ export class Viewer {
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
     this.hemi = new HemisphereLight(0xffffff, 0x6b7280, 1.6);
+    // Key and fill lights travel with the camera, so a body turned to any
+    // side is lit the same way, as if it were turning in a studio.
     this.key = new DirectionalLight(0xffffff, 1.6);
-    this.key.position.set(1.5, 3, 2.5);
+    this.key.position.set(1.4, 1.6, 1.2);
     this.fill = new DirectionalLight(0xdfe8ff, 0.7);
-    this.fill.position.set(-2, 1.5, -1.5);
+    this.fill.position.set(-1.8, 0.4, 0.6);
+    const aim = new Object3D();
+    aim.position.set(0, 0, -3);
+    this.camera.add(this.key, this.fill, aim);
+    this.key.target = aim; this.fill.target = aim;
     this.ambient = new AmbientLight(0xffffff, 0.25);
-    this.scene.add(this.hemi, this.key, this.fill, this.ambient);
+    this.scene.add(this.camera, this.hemi, this.ambient);
 
     this.floor = new GridHelper(4, 16, 0x3a3f4a, 0x2a2e36);
     this.scene.add(this.floor);
@@ -107,6 +113,49 @@ export class Viewer {
     this.needsRender = true;
   }
 
+  /**
+   * Turn the body in front of the camera: the camera and its target swing
+   * around the body's vertical axis (yaw) and tilt around a horizontal axis
+   * through `center` (pitch, kept within +-80 degrees). Lights move with the
+   * camera, so it looks and feels like turning the body itself.
+   */
+  spin(dYaw: number, dPitch: number, center: Vector3): void {
+    this.fly = null;
+    const cam = this.camera.position, tgt = this.controls.target;
+    if (dYaw) {
+      const q = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), dYaw);
+      cam.sub(center).applyQuaternion(q).add(center);
+      tgt.sub(center).applyQuaternion(q).add(center);
+    }
+    if (dPitch) {
+      const off = cam.clone().sub(center);
+      const right = new Vector3().crossVectors(new Vector3(0, 1, 0), off).normalize();
+      if (right.lengthSq() > 0) {
+        const elev = Math.asin(Math.min(1, Math.max(-1, off.y / off.length())));
+        const limit = (80 * Math.PI) / 180;
+        const want = Math.min(limit, Math.max(-limit, elev + dPitch));
+        const q = new Quaternion().setFromAxisAngle(right, -(want - elev));
+        cam.sub(center).applyQuaternion(q).add(center);
+        tgt.sub(center).applyQuaternion(q).add(center);
+      }
+    }
+    this.controls.update();
+    this.needsRender = true;
+  }
+
+  /** Whole-body view from a side: 0 front, 90 the body's left, 180 back, 270 right. */
+  viewFrom(yawDeg: number, height: number): void {
+    const target = new Vector3(0, height * 0.5, 0);
+    const b = this.compareFilter ? 0 : this.inset.bottom;
+    const vFactor = (this.height + b) / Math.max(1, this.height - b);
+    const dist = ((height * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360)) * vFactor;
+    const aspect = this.viewAspect();
+    const aspectFix = aspect < 0.75 ? 1 / aspect * 0.75 : 1;
+    const a = (yawDeg * Math.PI) / 180;
+    const r = dist * aspectFix;
+    this.flyTo({ target, position: new Vector3(Math.sin(a) * r, height * 0.52, Math.cos(a) * r) });
+  }
+
   /** Front view of the whole body of the given height. */
   frameBody(height: number): void {
     const target = new Vector3(0, height * 0.5, 0);
@@ -126,6 +175,16 @@ export class Viewer {
   setInsets(inset: { right?: number; bottom?: number }): void {
     this.inset = { right: Math.max(0, inset.right ?? 0), bottom: Math.max(0, inset.bottom ?? 0) };
     this.needsRender = true;
+  }
+
+  /**
+   * Factor by which screen-sized sprites appear enlarged because of the
+   * panel view offset (the visible window is part of a larger virtual frame).
+   * Divide a sprite's scale by this to keep a constant size in pixels.
+   */
+  spriteMagnification(): number {
+    if (this.compareFilter) return 1;
+    return (this.height + this.inset.bottom) / this.height;
   }
 
   /** Aspect ratio of one viewport. */

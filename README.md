@@ -62,6 +62,11 @@ both devices are on the same Wi-Fi.
   ring and drag the arm into place (inverse kinematics within realistic
   joint limits). Tattoos move with the skin, and placing, dragging and
   measuring work on a posed arm.
+- Turning the body: drag the ring on the floor to spin the body, drag up
+  or down to tilt it (to see shoulders from above or soles from below),
+  double-click the ring for the front view, or use the Front, Left, Back
+  and Right buttons. Arrow keys turn and tilt when no design is selected.
+  Lights travel with the view so every side is evenly lit.
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

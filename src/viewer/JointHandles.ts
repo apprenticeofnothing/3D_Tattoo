@@ -62,6 +62,11 @@ export class JointHandles {
 
   setVisible(v: boolean): void { this.group.visible = v; }
 
+  /** Keep the rings the same size on screen when the view is offset by a panel. */
+  setMagnification(m: number): void {
+    for (const [k, s] of this.sprites) s.scale.setScalar((k.endsWith('wrist') ? 0.042 : 0.036) / m);
+  }
+
   /** World positions of all handles, for hit testing in screen space. */
   positions(): Array<{ side: ArmSide; joint: JointId; p: Vector3 }> {
     const out: Array<{ side: ArmSide; joint: JointId; p: Vector3 }> = [];

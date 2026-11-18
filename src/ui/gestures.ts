@@ -3,7 +3,7 @@
 // the event to the camera controls. One finger on a design moves it; a
 // second finger always hands over to the camera.
 
-export type DragKind = 'move' | 'rotate' | 'scale' | 'joint';
+export type DragKind = 'move' | 'rotate' | 'scale' | 'joint' | 'spin';
 
 export interface GestureHandlers {
   /** Return which drag to start for a pointer-down at (x, y), or null to let the camera have it. */

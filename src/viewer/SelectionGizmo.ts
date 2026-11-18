@@ -72,6 +72,12 @@ export class SelectionGizmo {
     this.group.visible = true;
   }
 
+  /** Keep the handles the same size on screen when the view is offset by a panel. */
+  setMagnification(m: number): void {
+    this.rotateHandle.scale.setScalar(0.045 / m);
+    this.scaleHandle.scale.setScalar(0.045 / m);
+  }
+
   /** Handles lifted slightly toward the camera so they are not buried in the skin. */
   liftToward(cameraPos: Vector3): void {
     for (const s of [this.rotateHandle, this.scaleHandle]) {

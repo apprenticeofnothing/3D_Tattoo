@@ -12,6 +12,7 @@ import { Viewer, type CompareSide } from './viewer/Viewer';
 import { SelectionGizmo } from './viewer/SelectionGizmo';
 import { MeasureOverlay } from './viewer/MeasureOverlay';
 import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles';
+import { TurntableRing } from './viewer/TurntableRing';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
@@ -40,6 +41,9 @@ const measureOverlay = new MeasureOverlay();
 viewer.scene.add(measureOverlay.group);
 const jointHandles = new JointHandles();
 viewer.scene.add(jointHandles.group);
+const ring = new TurntableRing();
+viewer.scene.add(ring.group);
+const bodyCentre = () => new Vector3(0, heightM() * 0.5, 0);
 const designs = new DesignStore();
 const history = new History();
 let surface: SurfaceMesh | null = null;
@@ -111,6 +115,7 @@ function afterBodyChange(opts: { frame?: boolean } = {}) {
   const carry = !restorePending && placed.length ? projectData() : null;
   surface = bodySource === 'builder' && builder && body === builder.mesh ? builder.restSurface() : surfaceFromObject(body);
   bodyTriangles = surface.indices.length / 3;
+  ring.setRadius(0.3 * heightM());
   if (opts.frame !== false) viewer.frameBody(heightM());
   if (restorePending) { clearPlacements(); const data = restorePending; restorePending = null; void applyProject(data); return; }
   if (carry && prev && prev.topology && prev.topology === surface.topology && prev.indices.length === surface.indices.length) {
@@ -244,6 +249,8 @@ function updateViewInsets() {
   }
   // A bottom sheet changes how much height is free: re-frame the whole body.
   if (insetBottom !== before) viewer.frameBody(heightM());
+  jointHandles.setMagnification(viewer.spriteMagnification());
+  gizmo.setMagnification(viewer.spriteMagnification());
 }
 window.addEventListener('resize', updateViewInsets);
 
@@ -728,10 +735,11 @@ async function openProject(file: File) {
 async function takePhoto() {
   try {
     // Hide the selection outline and handles for a clean image.
-    const wasVisible = gizmo.group.visible;
-    gizmo.group.visible = false;
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const was = helpers.map((g) => g.visible);
+    helpers.forEach((g) => { g.visible = false; });
     let blob: Blob;
-    try { blob = await viewer.screenshot(); } finally { gizmo.group.visible = wasVisible; viewer.requestRender(); }
+    try { blob = await viewer.screenshot(); } finally { helpers.forEach((g, i) => { g.visible = was[i]; }); viewer.requestRender(); }
     const file = new File([blob], `tattoo-${stamp()}.png`, { type: 'image/png' });
     const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
     if (nav.share && nav.canShare?.({ files: [file] })) {
@@ -768,6 +776,7 @@ function setCompare(on: boolean) {
 function setMeasure(mode: null | 'distance' | 'around') {
   measuring = mode;
   measureFirst = null;
+  stage.classList.toggle('measuring', !!mode);
   $('btn-measure').classList.toggle('active', !!mode);
   $('measure-bar').classList.toggle('hidden', !mode);
   if (!mode) { measureOverlay.clear(); viewer.requestRender(); return; }
@@ -813,6 +822,31 @@ type Drag = { kind: DragKind; offset: { dx: number; dy: number }; joint?: { side
 let drag: Drag | null = null;
 const HANDLE_RADIUS = 30;
 let grabbedJoint: { side: ArmSide; joint: JointId } | null = null;
+let spinSign = 1;
+let spinLast = { x: 0, y: 0 };
+
+/** Is the pointer on the turntable ring? Returns the grabbed ring point, or null. */
+function ringHit(x: number, y: number): Vector3 | null {
+  let best: Vector3 | null = null, bd = 22;
+  for (const p of ring.samples()) {
+    const s = toScreen([p.x, p.y, p.z]);
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+/** Joint ring under the pointer (while posing arms). */
+function jointHit(x: number, y: number): { side: ArmSide; joint: JointId } | null {
+  if (!jointHandles.group.visible) return null;
+  let best: { side: ArmSide; joint: JointId; d: number } | null = null;
+  for (const h of jointHandles.positions()) {
+    const s = toScreen([h.p.x, h.p.y, h.p.z]);
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < 30 && (!best || d < best.d)) best = { side: h.side, joint: h.joint, d };
+  }
+  return best ? { side: best.side, joint: best.joint } : null;
+}
 
 /** New pose with one arm replaced; mirrored to the other arm when the panel edits both. */
 function poseWithArm(side: ArmSide, arm: import('./body/pose').ArmPose): Pose {
@@ -830,14 +864,19 @@ function nearHandle(x: number, y: number, p: [number, number, number] | null): b
 
 attachGestures(viewer.renderer.domElement, viewer.controls, {
   hitTest(x, y) {
-    if (jointHandles.group.visible) {
-      let best: { side: ArmSide; joint: JointId; d: number } | null = null;
-      for (const h of jointHandles.positions()) {
-        const s = toScreen([h.p.x, h.p.y, h.p.z]);
-        const d = Math.hypot(s.x - x, s.y - y);
-        if (d < 30 && (!best || d < best.d)) best = { side: h.side, joint: h.joint, d };
-      }
-      if (best) { grabbedJoint = { side: best.side, joint: best.joint }; return 'joint'; }
+    const jh = jointHit(x, y);
+    if (jh) { grabbedJoint = jh; return 'joint'; }
+    if (!compare && surface && !measuring && selected?.result) {
+      const h = selected.handles(surface, display());
+      if (nearHandle(x, y, h.rotate)) return 'rotate';
+      if (nearHandle(x, y, h.scale)) return 'scale';
+    }
+    const rp = ringHit(x, y);
+    if (rp) {
+      // Grabbing the far side of the ring turns it the other way, like a real turntable.
+      const toCam = viewer.camera.position.clone().setY(0);
+      spinSign = rp.clone().setY(0).dot(toCam) >= 0 ? 1 : -1;
+      return 'spin';
     }
     if (compare || !surface || measuring) return null;
     if (selected?.result) {
@@ -863,6 +902,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     if (d) select(d); else if (selected) select(null);
   },
   onDragStart(kind, x, y) {
+    if (kind === 'spin') { spinLast = { x, y }; viewer.renderer.domElement.classList.add('grabbing'); return; }
     if (kind === 'joint' && grabbedJoint && builder) {
       // Drag in the plane through the joint that faces the camera.
       const p = builder.posedWorldJoint(grabbedJoint.side, grabbedJoint.joint);
@@ -879,6 +919,12 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     drag = { kind, offset };
   },
   onDragMove(kind, x, y) {
+    if (kind === 'spin') {
+      const dx = x - spinLast.x, dy = y - spinLast.y;
+      spinLast = { x, y };
+      viewer.spin(-spinSign * dx * 0.009, dy * 0.006, bodyCentre());
+      return;
+    }
     if (kind === 'joint' && drag?.joint && builder && builderState) {
       raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
       const ray = raycaster.ray;
@@ -926,6 +972,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     recompute(selected, false);
   },
   onDragEnd(kind, cancelled) {
+    if (kind === 'spin') { viewer.renderer.domElement.classList.remove('grabbing'); return; }
     if (kind === 'joint') {
       drag = null; grabbedJoint = null;
       if (!cancelled && builderState) setPose(builderState.pose ?? {}, false);
@@ -939,6 +986,28 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
   },
 });
 viewer.controls.addEventListener('change', () => { /* handles are sprites; nothing to do */ });
+
+// The view buttons make way for the placement hint.
+new MutationObserver(() => stage.classList.toggle('hinting', !hint.classList.contains('hidden'))).observe(hint, { attributes: true, attributeFilter: ['class'] });
+
+// Hover feedback: grab cursor over the ring and the joint rings, ring lights up.
+let ringHover = false;
+viewer.renderer.domElement.addEventListener('pointermove', (e) => {
+  if (e.buttons) return;
+  const onRing = !!ringHit(e.clientX, e.clientY);
+  const onJoint = !!jointHit(e.clientX, e.clientY);
+  viewer.renderer.domElement.classList.toggle('grab', onRing || onJoint);
+  if (onRing !== ringHover) {
+    ringHover = onRing;
+    ring.setHighlight(onRing);
+    viewer.requestRender();
+    if (onRing) setStatus('Drag the ring to turn the body; up and down tilts it. Double-click for the front view.');
+  }
+});
+viewer.renderer.domElement.addEventListener('dblclick', (e) => {
+  if (ringHit(e.clientX, e.clientY)) viewer.frameBody(heightM());
+});
+$('view-chips').querySelectorAll<HTMLButtonElement>('[data-yaw]').forEach((b) => b.addEventListener('click', () => viewer.viewFrom(Number(b.dataset.yaw), heightM())));
 
 // ---------- UI wiring ----------
 
@@ -1016,6 +1085,13 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
   else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && selected) { e.preventDefault(); removeDesign(selected); }
+  else if (!selected && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+    e.preventDefault();
+    const step = (e.shiftKey ? 45 : 15) * Math.PI / 180;
+    if (e.key === 'ArrowLeft') viewer.spin(-step, 0, bodyCentre());
+    else if (e.key === 'ArrowRight') viewer.spin(step, 0, bodyCentre());
+    else viewer.spin(0, (e.key === 'ArrowUp' ? -1 : 1) * step * 0.66, bodyCentre());
+  }
   else if (e.key === 'Escape') { if (measuring) setMeasure(null); else if (pending) { pending = null; hint.classList.add('hidden'); } else select(null); }
   else if (selected && surface && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '[', ']'].includes(e.key)) {
     e.preventDefault();
@@ -1064,6 +1140,10 @@ try {
   openBodyPanel, closeBodyPanel, choosePreset: (id: string) => { const p = presetById(id); if (p) choosePreset(p); },
   setBuilderParams, builderState: () => builderState, bodySource: () => bodySource,
   setPose, openPosePanel, closePosePanel,
+  ringScreen: (deg: number) => { const r = ring.samples(360)[Math.round(((deg % 360) + 360) % 360)]; return toScreen([r.x, r.y, r.z]); },
+  cameraYaw: () => Math.atan2(viewer.camera.position.x, viewer.camera.position.z) * 180 / Math.PI,
+  cameraElevation: () => { const o = viewer.camera.position.clone().sub(bodyCentre()); return Math.asin(o.y / o.length()) * 180 / Math.PI; },
+  viewFrom: (yaw: number) => viewer.viewFrom(yaw, heightM()),
   jointScreen: (side: ArmSide, joint: JointId) => { if (!builder) return null; const p = builder.posedWorldJoint(side, joint); return toScreen([p.x, p.y, p.z]); },
   posedJoint: (side: ArmSide, joint: JointId | 'shoulder') => builder ? builder.posedWorldJoint(side, joint).toArray() : null,
   setSkinMix: (m: number) => { if (builder) { builder.skinMix = m; builder.setPose(builder.pose); const D = display(); for (const d of placed) d.decal.setPositions(D); viewer.requestRender(); } },
