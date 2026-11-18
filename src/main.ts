@@ -11,6 +11,9 @@ import { attachGestures, type DragKind } from './ui/gestures';
 import { Viewer, type CompareSide } from './viewer/Viewer';
 import { SelectionGizmo } from './viewer/SelectionGizmo';
 import { MeasureOverlay } from './viewer/MeasureOverlay';
+import { CoverOverlay } from './viewer/CoverOverlay';
+import { coverage, sampleInk, sizeToCover, type InkSample } from './existing/coverage';
+import { barycentric, computeExpMap, normalAt, tangentFrom } from './mapping/expmap';
 import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles';
 import { TurntableRing } from './viewer/TurntableRing';
 import { wheelFactor } from './viewer/zoom';
@@ -21,14 +24,13 @@ import { detectPose } from './existing/poseModel';
 import { describeHint, HALF_WIDTH, maskEdges, suggestFromPose, type PoseHint } from './existing/poseSuggest';
 import type { Rgba } from './existing/image';
 import { widthFromCircumference, widthFromVisibleWidth } from './existing/flatten';
-import { tangentFrom } from './mapping/expmap';
 import { sourceImage, stencilPdf, stencilPng, stencilSvg } from './export/stencil';
 import { describeArea, describeRotation } from './export/placementText';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
 import { History, newId, type PlacementData, type ProjectData } from './app/project';
-import { PlacedDesign, nearestTriangle, pointFromBary, toDisplay, type Placement } from './mapping/placements';
+import { PlacedDesign, designTangent, nearestTriangle, pointFromBary, toDisplay, type Placement } from './mapping/placements';
 import { BuilderBody, defaultParams, loadBodyData, presetParamsAtHeight, SKIN_TONES, type Appearance, type BodyData, type BodyParams, type PresetMeta } from './body/builder';
 import { BodyPanel } from './ui/bodyPanel';
 import { PosePanel } from './ui/posePanel';
@@ -590,7 +592,7 @@ function recompute(d: PlacedDesign, exact: boolean) {
     try {
       if (placed.includes(d)) {
         d.update(surface!, state.exact, display());
-        if (d === selected) { panel.renderReadout(d); updateGizmo(); }
+        if (d === selected) { panel.renderReadout(d); updateGizmo(); if (state.exact) scheduleCoverCheck(); }
         viewer.requestRender();
       }
     } catch (err) {
@@ -610,6 +612,7 @@ function select(d: PlacedDesign | null) {
   panel.setDesigns(placed, d?.placement.id ?? null);
   updateGizmo();
   viewer.requestRender();
+  scheduleCoverCheck();
   if (d) revealSelected();
 }
 
@@ -839,7 +842,7 @@ async function openProject(file: File) {
 async function takePhoto() {
   try {
     // Hide the selection outline and handles for a clean image.
-    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group, coverOverlay.points];
     const was = helpers.map((g) => g.visible);
     helpers.forEach((g) => { g.visible = false; });
     let blob: Blob;
@@ -1241,7 +1244,7 @@ function placementCamera(d: PlacedDesign): { position: Vector3; target: Vector3 
 
 async function snapshotJpeg(): Promise<{ jpeg: Uint8Array; widthPx: number; heightPx: number } | undefined> {
   try {
-    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group, coverOverlay.points];
     const was = helpers.map((g) => g.visible);
     helpers.forEach((g) => { g.visible = false; });
     const cam = selected ? placementCamera(selected) : null;
@@ -1375,6 +1378,152 @@ const picker = createPicker(app, goTo);
 const addSheet = createSheet(app, 'Add a design');
 const moreSheet = createSheet(app, 'More');
 const orientSheet = createSheet(app, 'Orientation of the scan');
+
+// ---------- Cover-up check ----------
+
+const coverOverlay = new CoverOverlay();
+viewer.scene.add(coverOverlay.points);
+let showThrough = false;
+let coverTimer = 0;
+const pixelCache = new Map<string, Rgba>();
+
+/** Pixels of a design's image (small copy, cached per design). */
+function designPixels(d: PlacedDesign): Rgba {
+  const key = d.placement.designId;
+  const hit = pixelCache.get(key);
+  if (hit) return hit;
+  const img = d.placement.design.texture.image as CanvasImageSource & { width: number; height: number };
+  const s = Math.min(1, 512 / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(img.width * s)); c.height = Math.max(1, Math.round(img.height * s));
+  const ctx = c.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const px = { width: c.width, height: c.height, data: ctx.getImageData(0, 0, c.width, c.height).data };
+  pixelCache.set(key, px);
+  return px;
+}
+
+interface CoverState {
+  newId: string; oldId: string; oldName: string;
+  samples: InkSample[];
+  /** Where each old sample is on the skin (rest pose), for drawing. */
+  skin: Array<{ tri: number; point: [number, number, number] } | null>;
+}
+let cover: CoverState | null = null;
+
+/** The existing tattoo a new design is most likely meant to cover (overlapping or close). */
+function oldTattooNear(d: PlacedDesign): PlacedDesign | null {
+  let best: PlacedDesign | null = null, bd = Infinity;
+  const c = new Vector3(...d.placement.point);
+  for (const o of placed) {
+    if (!o.placement.existing || o === d || !o.result) continue;
+    const dist = c.distanceTo(new Vector3(...o.placement.point));
+    const reach = 0.5 * (Math.hypot(d.widthM, d.heightM) + Math.hypot(o.widthM, o.heightM)) + 0.05;
+    if (dist < reach && dist < bd) { bd = dist; best = o; }
+  }
+  return best;
+}
+
+/** Old ink in the new design's flat coordinates, following the skin. */
+function coverSamples(d: PlacedDesign, old: PlacedDesign): CoverState | null {
+  if (!surface || !d.result) return null;
+  const img = designPixels(old);
+  const step = Math.max(0.002, Math.hypot(old.widthM, old.heightM) / 70);
+  const raw = sampleInk(img, old.widthM, old.heightM, old.placement.mirror, step);
+  const loc = old.getLocator(surface);
+  if (!loc || !raw.length) return null;
+  const skin = raw.map((s) => loc.locateTri(s.u, s.v));
+  // A flattening around the new design's centre, wide enough to reach all the old ink.
+  const p = d.placement;
+  const anchor = new Vector3(...p.point);
+  let reach = 0;
+  for (const h of skin) if (h) reach = Math.max(reach, anchor.distanceTo(new Vector3(...h.point)));
+  const normal = normalAt(surface, p.tri, barycentric(surface, p.tri, p.point));
+  const tangent = designTangent(normal, p.rotation);
+  const patch = computeExpMap(surface, { tri: p.tri, point: p.point, normal, tangent }, { radius: Math.min(0.5, reach * 1.3 + 0.03), exact: false, smoothPasses: 2 });
+  const I = surface.indices;
+  const samples: InkSample[] = raw.map((s, i) => {
+    const h = skin[i];
+    const far = { u: 1e3, v: 1e3, dark: s.dark };
+    if (!h) return far;
+    const l = [patch.local[I[h.tri * 3]], patch.local[I[h.tri * 3 + 1]], patch.local[I[h.tri * 3 + 2]]];
+    if (l.some((x) => x < 0)) return far;
+    const b = barycentric(surface!, h.tri, h.point);
+    return {
+      u: b[0] * patch.uv[l[0] * 2] + b[1] * patch.uv[l[1] * 2] + b[2] * patch.uv[l[2] * 2],
+      v: b[0] * patch.uv[l[0] * 2 + 1] + b[1] * patch.uv[l[1] * 2 + 1] + b[2] * patch.uv[l[2] * 2 + 1],
+      dark: s.dark,
+    };
+  });
+  return { newId: p.id, oldId: old.placement.id, oldName: old.placement.design.name.replace(/(-existing)?\.[a-z0-9]+$/i, ''), samples, skin };
+}
+
+function scheduleCoverCheck() {
+  clearTimeout(coverTimer);
+  coverTimer = window.setTimeout(updateCoverCheck, 150);
+}
+
+/** Fill the panel's cover-up section for the selected design. */
+function updateCoverCheck() {
+  const el = panel.cover;
+  const d = selected;
+  coverOverlay.clear();
+  if (!d || !surface || !d.result || compare) { el.classList.add('hidden'); cover = null; viewer.requestRender(); return; }
+  if (d.placement.existing) {
+    el.innerHTML = '<b>Planning a cover-up?</b> Add a new design and drag it over this tattoo: its panel then shows how much of this one it hides.';
+    el.classList.remove('hidden');
+    cover = null;
+    return;
+  }
+  const old = oldTattooNear(d);
+  if (!old) { el.classList.add('hidden'); cover = null; return; }
+  cover = coverSamples(d, old);
+  if (!cover) { el.classList.add('hidden'); return; }
+  const res = coverage(cover.samples, designPixels(d), d.widthM, d.placement.design.aspect, d.placement.mirror);
+  const pct = Math.round(res.covered * 100);
+  const cls = res.covered >= 0.95 ? 'ok' : 'warn';
+  el.innerHTML = `<b>Cover-up check</b> against <i>${cover.oldName}</i>: <span class="${cls}">hides ${pct}% of the old tattoo</span>. `
+    + (res.covered >= 0.95 ? 'Its ink is at least as dark as the old ink almost everywhere.' : 'Where the new design is lighter or open, the old ink would show through.')
+    + `<div class="row"><button class="btn toggle${showThrough ? ' active' : ''}" data-cover="show">Show what shows through</button><button class="btn" data-cover="size">Size to cover</button></div>`
+    + '<span class="muted">An estimate from the two images: the artist decides how to shade a cover-up.</span>';
+  el.classList.remove('hidden');
+  if (showThrough) {
+    const D = display(), pos: number[] = [];
+    res.hidden.forEach((h, i) => {
+      const sk = cover!.skin[i];
+      if (h || !sk) return;
+      const q = toDisplay(surface!, D, sk.tri, sk.point);
+      const n = normalAtShown(sk.tri, D);
+      pos.push(q[0] + n[0] * 0.002, q[1] + n[1] * 0.002, q[2] + n[2] * 0.002);
+    });
+    coverOverlay.set(pos);
+  }
+  viewer.requestRender();
+}
+
+function normalAtShown(tri: number, D: Float32Array): [number, number, number] {
+  const I = surface!.indices;
+  const a = I[tri * 3] * 3, b = I[tri * 3 + 1] * 3, c = I[tri * 3 + 2] * 3;
+  const n = new Vector3(D[b] - D[a], D[b + 1] - D[a + 1], D[b + 2] - D[a + 2]).cross(new Vector3(D[c] - D[a], D[c + 1] - D[a + 1], D[c + 2] - D[a + 2])).normalize();
+  const N = surface!.normals;
+  if (D === surface!.positions && n.x * N[a] + n.y * N[a + 1] + n.z * N[a + 2] < 0) n.negate();
+  return [n.x, n.y, n.z];
+}
+
+panel.cover.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest('[data-cover]') as HTMLElement | null;
+  if (!b || !selected) return;
+  if (b.dataset.cover === 'show') { showThrough = !showThrough; updateCoverCheck(); return; }
+  if (b.dataset.cover === 'size' && cover) {
+    const d = selected;
+    const s = sizeToCover(cover.samples, designPixels(d), d.placement.design.aspect, d.placement.mirror, Math.max(0.01, d.widthM * 0.5), 1.5);
+    const w = Math.round(s.widthM * 1000) / 10;
+    if (s.reached) {
+      changeSelected({ widthCm: w }, true);
+      setStatus(`At ${w} cm wide it hides ${Math.round(s.covered * 100)}% of the old tattoo.`);
+    } else setStatus(`At no size does it hide more than ${Math.round(s.covered * 100)}% (best at ${w} cm): it has light or open areas over the old ink. Try moving or turning it, or a design with more solid dark areas.`);
+  }
+});
 
 // ---------- Existing tattoos ----------
 
@@ -1767,7 +1916,7 @@ try {
   lookAt: (pos: number[], target: number[]) => viewer.flyTo({ position: new Vector3(pos[0], pos[1], pos[2]), target: new Vector3(target[0], target[1], target[2]) }, 1),
   /** The view as a JPEG data URL without handles, ring or overlays (a stand-in for a phone photo). */
   photoDataUrl: async () => {
-    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group, coverOverlay.points];
     const was = helpers.map((g) => g.visible);
     helpers.forEach((g) => { g.visible = false; });
     try {
@@ -1784,6 +1933,7 @@ try {
   /** Focal length of the view camera in canvas pixels (what a photo of the view was taken with). */
   cameraFocalPx: () => (viewer.size().height * viewer.renderer.getPixelRatio()) / 2 / Math.tan((viewer.camera.fov * Math.PI) / 360),
   existingImport,
+  coverText: () => (panel.cover.classList.contains('hidden') ? null : panel.cover.textContent),
   openExport, runExport, sizeTagText: () => (sizeTag.classList.contains('hidden') ? null : sizeTag.textContent), placementLines: () => (selected ? placementLines(selected) : null),
   zoomSettled: () => viewer.isSettled(),
   cameraDistanceTo: (p: number[]) => viewer.camera.position.distanceTo(new Vector3(p[0], p[1], p[2])),

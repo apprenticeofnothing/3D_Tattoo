@@ -9,6 +9,7 @@
 //   B  wide side shot + tap on the tattoo + close-up: where it is
 //   C  a typed tape-measure width: exact size
 //   D  phone: the editor and placing work with touch-sized layout
+//   E  cover-up: how much a new design hides, what shows through, size to cover
 //
 // Size error is from the spread of the ink around its centre (independent
 // of rotation and of how dark the ink came out); orientation from the angle
@@ -189,6 +190,39 @@ async function placeAndCompare(page, truth, label, width) {
   await page.screenshot({ path: `${out}/et-C-editor.png` });
   const r = await placeAndCompare(page, truth, 'C ring measured 7 cm across', 7);
   log(`C image width on the body: ${r.got.widthCm} cm (ink 7 cm plus the margin around it)`);
+  await page.context().close();
+}
+
+// ---- E: cover-up check ------------------------------------------------------
+// The ring (7 cm) as an existing tattoo, then a solid dark disk over it: 5 cm
+// hides only part; "Size to cover" should land just over 7 cm.
+{
+  const page = await start({ viewport: { width: 1280, height: 800 } });
+  const truth = await plantTattoo(page, 'forearm-outer-left', ARM_OUT, { x: 0, y: 0 }, ring);
+  await page.evaluate(() => window.__app.deselect());
+  const url = await closeUp(page, truth, `${out}/et-E-photo.jpg`);
+  await hideTruth(page, truth.id);
+  await page.evaluate(([u, f]) => window.__app.openExistingPhoto(u, 'ring.jpg', f), [url, await page.evaluate(() => window.__app.cameraFocalPx())]);
+  await waitAnalysis(page);
+  await page.fill('.ex-editor [data-width]', '7');
+  await page.click('.ex-editor [data-go]');
+  await page.waitForFunction(() => document.querySelector('.ex-editor').classList.contains('hidden'), null, { timeout: 30000 });
+  await idle(page); await page.waitForTimeout(1200);
+  // A new design over it: tap where the old tattoo is.
+  await page.setInputFiles('#design-file', path.resolve('test-assets/cover-disk.svg'));
+  await page.waitForTimeout(400);
+  const at = await page.evaluate(() => { const d = window.__app.placed().find((x) => x.placement.existing); return window.__app.toScreen(window.__app.shownPoint(d.placement.tri, d.placement.point)); });
+  await page.mouse.click(at.x, at.y);
+  await page.waitForFunction(() => window.__app.selected() && !window.__app.selected().placement.existing && !window.__app.busy());
+  await page.evaluate(() => window.__app.set((d) => { d.placement.widthCm = 5; d.placement.mode = 'inked'; }));
+  await idle(page); await page.waitForTimeout(700);
+  log(`E 5 cm disk over the 7 cm ring: ${(await page.evaluate(() => window.__app.coverText()))?.split('.')[0]}`);
+  await page.click('[data-cover="show"]'); await page.waitForTimeout(600);
+  await page.screenshot({ path: `${out}/et-E-show-through.png` });
+  await page.click('[data-cover="size"]');
+  await idle(page); await page.waitForTimeout(800);
+  log(`E size to cover: width ${await page.evaluate(() => window.__app.selected().placement.widthCm)} cm; status "${await page.textContent('#status')}"; panel: ${(await page.evaluate(() => window.__app.coverText()))?.split('.')[0]}`);
+  await page.screenshot({ path: `${out}/et-E-covered.png` });
   await page.context().close();
 }
 
