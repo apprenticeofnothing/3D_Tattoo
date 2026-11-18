@@ -10,6 +10,12 @@ async function drag(page, from, to, steps = 20) {
   for (let i = 1; i <= steps; i++) { await page.mouse.move(from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps); await page.waitForTimeout(30); }
   await page.mouse.up(); await page.waitForTimeout(300);
 }
+/** Set the "Both arms together" switch. */
+async function setTogether(page, on) {
+  const now = await page.evaluate(() => document.querySelector('[data-together]').checked);
+  if (now !== on) await page.click('.pp-together');
+  await page.waitForTimeout(100);
+}
 const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
 page.on('pageerror', (e) => log(`pageerror: ${e.message}`));
 page.on('console', (m) => { if (m.type() === 'error') log(`error: ${m.text()}`); });
@@ -24,7 +30,7 @@ await page.evaluate(([x, y]) => window.__app.placeTestAt(x, y), [st.x + st.width
 await page.waitForFunction(() => !window.__app.busy()); await page.waitForTimeout(300);
 await page.click('#btn-pose'); await page.waitForTimeout(300);
 await page.evaluate(() => { const v = window.__app; }); // panel open: handles visible
-await page.click('.pp-side [data-side="left"]');
+await setTogether(page, false);
 // Reset the camera to the whole body.
 await page.evaluate(() => document.querySelector('#btn-more') && null);
 await page.evaluate(() => { const a = window.__app; a.goTo('chest'); }); await page.waitForTimeout(900);
@@ -58,15 +64,37 @@ const angErr = Math.abs(Math.atan2(e3.y - sh.y, e3.x - sh.x) - Math.atan2(beyond
 log(`elbow pulled beyond reach: stays ${Math.hypot(e3.x - sh.x, e3.y - sh.y).toFixed(0)} px from the shoulder (arm length ${R.toFixed(0)} px), direction off by ${angErr.toFixed(1)} degrees`);
 await page.screenshot({ path: `${out}/jd-3-elbow.png` });
 
-// 3. Both arms mirrored: drag the right wrist, the left follows.
-await page.click('.pp-side [data-side="both"]');
+// 3. One arm at a time: dragging the right wrist moves only the right arm,
+// and the sliders switch to it.
+const leftBefore = await page.evaluate(() => JSON.stringify(window.__app.builderState().pose.left));
+const rr = await page.evaluate(() => window.__app.jointScreen('right', 'wrist'));
+await drag(page, rr, { x: rr.x - 40, y: rr.y - 120 });
+const poseOne = await page.evaluate(() => window.__app.builderState().pose);
+const sliderArm = await page.evaluate(() => document.querySelector('.pp-side .seg-btn.active')?.dataset.side);
+log(`one arm: right moved ${!!poseOne.right}, left unchanged ${JSON.stringify(poseOne.left) === leftBefore}, sliders now on the ${sliderArm} arm`);
+await page.screenshot({ path: `${out}/jd-3b-one-arm.png` });
+
+// 4. Bend and stretch: drag the left hand up and back in one go; the arm
+// returns to exactly where it was.
+const armBefore = await page.evaluate(() => window.__app.builderState().pose.left);
+const b0 = await page.evaluate(() => window.__app.jointScreen('left', 'wrist'));
+await page.mouse.move(b0.x, b0.y); await page.mouse.down();
+const curl = [...Array(16).keys()].map((i) => (i + 1) / 16);
+for (const f of [...curl, ...curl.slice().reverse(), 0]) { await page.mouse.move(b0.x + 70 * f, b0.y - 150 * f); await page.waitForTimeout(25); }
+await page.mouse.up(); await page.waitForTimeout(300);
+const armAfter = await page.evaluate(() => window.__app.builderState().pose.left);
+const worst = Math.max(...['raise', 'forward', 'twist', 'bend'].map((k) => Math.abs((armAfter[k] ?? 0) - (armBefore[k] ?? 0))));
+log(`bend and stretch with the hand ring: largest angle change after returning ${worst.toFixed(2)}°`);
+
+// 5. Both arms mirrored: drag the right wrist, the left follows.
+await setTogether(page, true);
 const r0 = await page.evaluate(() => window.__app.jointScreen('right', 'wrist'));
 await drag(page, r0, { x: r0.x + 60, y: r0.y - 180 });
 const pose = await page.evaluate(() => window.__app.builderState().pose);
 log(`both arms: left = right ? ${JSON.stringify(pose.left) === JSON.stringify(pose.right)}`);
 await page.screenshot({ path: `${out}/jd-4-both.png` });
 
-// 4. Out-of-reach pull: drag far away; arm straight, within limits.
+// 6. Out-of-reach pull: drag far away; arm straight, within limits.
 const r1 = await page.evaluate(() => window.__app.jointScreen('right', 'wrist'));
 await drag(page, r1, { x: 60, y: 120 });
 const p2 = await page.evaluate(() => window.__app.builderState().pose.right);

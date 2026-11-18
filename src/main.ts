@@ -960,7 +960,7 @@ $('measure-bar').querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => 
 
 // ---------- Gestures ----------
 
-type Drag = { kind: DragKind; offset: { dx: number; dy: number }; joint?: { side: ArmSide; joint: JointId; plane: Plane } };
+type Drag = { kind: DragKind; offset: { dx: number; dy: number }; joint?: { side: ArmSide; joint: JointId; plane: Plane; start?: Partial<import('./body/pose').ArmPose> } };
 let drag: Drag | null = null;
 const HANDLE_RADIUS = 30;
 let grabbedJoint: { side: ArmSide; joint: JointId } | null = null;
@@ -991,7 +991,7 @@ function jointHit(x: number, y: number): { side: ArmSide; joint: JointId } | nul
   return best ? { side: best.side, joint: best.joint } : null;
 }
 
-/** New pose with one arm replaced; mirrored to the other arm when the panel edits both. */
+/** New pose with one arm replaced; mirrored to the other arm when both arms move together. */
 function poseWithArm(side: ArmSide, arm: import('./body/pose').ArmPose): Pose {
   const cur = builderState?.pose ?? {};
   const next: Pose = { left: cur.left, right: cur.right, [side]: arm };
@@ -1073,7 +1073,11 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
       // Drag in the plane through the joint that faces the camera.
       const p = builder.posedWorldJoint(grabbedJoint.side, grabbedJoint.joint);
       const n = new Vector3(); viewer.camera.getWorldDirection(n);
-      drag = { kind, offset: { dx: 0, dy: 0 }, joint: { ...grabbedJoint, plane: new Plane().setFromNormalAndCoplanarPoint(n, p) } };
+      // The arm as it was when grabbed: the solver moves it as little as it can
+      // from there, so dragging out and back returns it as it was.
+      const start = builderState?.pose?.[grabbedJoint.side];
+      drag = { kind, offset: { dx: 0, dy: 0 }, joint: { ...grabbedJoint, plane: new Plane().setFromNormalAndCoplanarPoint(n, p), start: { ...(start ?? {}) } } };
+      posePanel?.focusArm(grabbedJoint.side);
       return;
     }
     if (!selected || !surface) return;
@@ -1110,7 +1114,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
           t.copy(p1.distanceTo(el) <= p2.distanceTo(el) ? p1 : p2);
         } else ray.closestPointToPoint(sh, t);
       } else if (!ray.intersectPlane(drag.joint.plane, t)) return;
-      setPose(poseWithArm(drag.joint.side, builder.solveIK(drag.joint.side, drag.joint.joint, t)), true);
+      setPose(poseWithArm(drag.joint.side, builder.solveIK(drag.joint.side, drag.joint.joint, t, drag.joint.start)), true);
       return;
     }
     if (!selected || !surface || !drag) return;

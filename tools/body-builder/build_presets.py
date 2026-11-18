@@ -310,6 +310,49 @@ def main():
             if nbr[v]:
                 W2[v] = 0.5 * W[v] + 0.5 * W[nbr[v]].mean(axis=0)
         W = W2
+
+    # ---------- elbow weight repair ----------
+    # MakeHuman lets the forearm bones pull on the front of the upper arm up
+    # to halfway to the shoulder (4% there, 44% 3 cm above the elbow). When
+    # the elbow bends, that skin turns with the forearm about the elbow and
+    # sinks into the arm: the biceps caves in by 1.5 to 3 cm instead of
+    # keeping its shape. On the front and sides of the arm, limit the
+    # forearm's share to a band around the elbow crease: none from 2 cm above
+    # the crease plane (the plane halving the rest elbow angle), all of it
+    # from 3 cm below. The back of the elbow keeps MakeHuman's wider blend,
+    # which rounds the point of the elbow well.
+    for side_i, side in enumerate(('L', 'R')):
+        sh = joint(f'upperarm01.{side}____head')
+        el = joint(f'lowerarm01.{side}____head')
+        wr = joint(f'wrist.{side}____head')
+        dU = (el - sh) / np.linalg.norm(el - sh)
+        dF = (wr - el) / np.linalg.norm(wr - el)
+        front = dF - dF.dot(dU) * dU
+        front /= np.linalg.norm(front)
+        crease = (dU + dF) / np.linalg.norm(dU + dF)
+        arm_parts = {PARTS.index(f'upperarm.{side}'), PARTS.index(f'forearm.{side}')}
+        on_arm = np.array([l in arm_parts for l in labels])
+        fore_ids = [1 + side_i * len(POSE_BONES) + POSE_BONES.index(b) for b in ('lowerarm01', 'lowerarm02', 'wrist', 'hand')]
+        upper2 = 1 + side_i * len(POSE_BONES) + POSE_BONES.index('upperarm02')
+        rel = pos_r - el
+        h = rel @ crease
+        radial = rel - np.outer(rel @ dU, dU)
+        c = (radial @ front) / np.maximum(np.linalg.norm(radial, axis=1), 1e-9)
+
+        def smoothstep(lo, hi, x):
+            t = np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+            return t * t * (3 - 2 * t)
+        cap = smoothstep(-0.02, 0.03, h)          # largest forearm share allowed
+        how_front = smoothstep(-0.6, 0.3, c)      # 1 front and sides, 0 back
+        fs = W[:, fore_ids].sum(axis=1)
+        want = fs * (1 - how_front) + np.minimum(fs, cap) * how_front
+        sel = on_arm & (fs > 1e-6) & (want < fs - 1e-9)
+        scale = np.where(sel, want / np.maximum(fs, 1e-12), 1.0)
+        removed = np.where(sel, fs - want, 0.0)
+        W[:, fore_ids] *= scale[:, None]
+        W[:, upper2] += removed
+        elbow_report = (side, int(sel.sum()), float(removed.max()) if sel.any() else 0.0)
+        print('elbow repair %s: %d vertices, largest change %.2f' % elbow_report)
     # Top four pose bones per vertex, quantised to uint8 summing to 255.
     skin_ids = np.zeros((nv, 4), dtype=np.uint8)
     skin_wts = np.zeros((nv, 4), dtype=np.uint8)

@@ -1,4 +1,5 @@
-// Arm pose panel: quick poses and sliders for each arm (or both mirrored).
+// Arm pose panel: a switch for moving both arms together (mirrored) or one
+// at a time, quick poses and sliders.
 
 import { POSE_LIMITS, POSE_PRESETS, type ArmPose, type Pose, type Side } from '../body/pose';
 
@@ -16,6 +17,11 @@ export interface PosePanelCallbacks {
 
 type Target = 'both' | Side;
 
+const TOGETHER_KEY = 'tattoo.armsTogether';
+function loadTogether(): boolean {
+  try { return localStorage.getItem(TOGETHER_KEY) !== 'false'; } catch { return true; }
+}
+
 const SLIDERS: Array<{ id: keyof ArmPose; label: string; left: string; right: string }> = [
   { id: 'raise', label: 'Raise arm', left: 'Down', right: 'Up' },
   { id: 'forward', label: 'Arm forward', left: 'Behind', right: 'In front' },
@@ -26,7 +32,10 @@ const SLIDERS: Array<{ id: keyof ArmPose; label: string; left: string; right: st
 
 export class PosePanel {
   readonly el: HTMLElement;
-  private target: Target = 'both';
+  /** Both arms move together (mirrored), or only one. */
+  private together = loadTogether();
+  /** The arm the sliders and quick poses edit when arms move one at a time. */
+  private one: Side = 'left';
   private rows = new Map<keyof ArmPose, { input: HTMLInputElement; value: HTMLElement; reset: HTMLButtonElement }>();
 
   constructor(root: HTMLElement, private state: PosePanelState, private cb: PosePanelCallbacks) {
@@ -36,15 +45,18 @@ export class PosePanel {
       <div class="bp-head"><span>Arm pose</span><button class="btn ghost" data-close>Done</button></div>
       <div class="bp-body">
         <p class="bp-scan-note pp-unavailable hidden">Arm posing works on the built bodies. A loaded scan keeps the pose it was captured in.</p>
-        <p class="pp-tip">Drag the green hand rings or yellow elbow rings on the body to move an arm.</p>
+        <label class="pp-together">
+          <span class="pp-together-text"><b>Both arms together</b><small class="pp-together-sub"></small></span>
+          <input type="checkbox" class="switch" role="switch" data-together aria-label="Both arms together" />
+        </label>
+        <div class="seg pp-side" role="group" aria-label="Arm to move">
+          <button class="btn seg-btn" data-side="left">Left arm</button>
+          <button class="btn seg-btn" data-side="right">Right arm</button>
+        </div>
+        <p class="pp-tip"></p>
         <h3>Quick poses</h3>
         <div class="pp-presets"></div>
         <h3>Adjust</h3>
-        <div class="seg pp-side">
-          <button class="btn seg-btn" data-side="both">Both arms</button>
-          <button class="btn seg-btn" data-side="left">Left</button>
-          <button class="btn seg-btn" data-side="right">Right</button>
-        </div>
         <div class="pp-sliders"></div>
         <div class="bp-row bp-foot"><button class="btn" data-reset>Relax arms</button></div>
         <p class="muted bp-credit">Tattoos move with the skin. Size and stretch are measured on the relaxed body; use the heatmap there to judge distortion.</p>
@@ -62,7 +74,14 @@ export class PosePanel {
       });
       presets.appendChild(b);
     }
-    this.el.querySelectorAll<HTMLButtonElement>('.pp-side .seg-btn').forEach((b) => b.addEventListener('click', () => { this.target = b.dataset.side as Target; this.render(); }));
+    const sw = this.el.querySelector<HTMLInputElement>('[data-together]')!;
+    sw.checked = this.together;
+    sw.addEventListener('change', () => {
+      this.together = sw.checked;
+      try { localStorage.setItem(TOGETHER_KEY, String(this.together)); } catch { /* ignore */ }
+      this.render();
+    });
+    this.el.querySelectorAll<HTMLButtonElement>('.pp-side .seg-btn').forEach((b) => b.addEventListener('click', () => { this.one = b.dataset.side as Side; this.render(); }));
     const wrap = this.el.querySelector('.pp-sliders')!;
     for (const def of SLIDERS) {
       const [min, max] = POSE_LIMITS[def.id];
@@ -84,8 +103,10 @@ export class PosePanel {
   }
 
   get open(): boolean { return !this.el.classList.contains('hidden'); }
-  /** Which arms the panel edits: both mirrored, or one. */
-  get side(): Target { return this.target; }
+  /** Which arms move: both mirrored, or one. */
+  get side(): Target { return this.together ? 'both' : this.one; }
+  /** An arm was grabbed on the body: when arms move one at a time, the sliders follow it. */
+  focusArm(side: Side): void { if (this.one !== side) { this.one = side; this.render(); } }
   show(): void { this.el.classList.remove('hidden'); this.render(); }
   hide(): void { this.el.classList.add('hidden'); }
   update(state: Partial<PosePanelState>): void { this.state = { ...this.state, ...state }; this.render(); }
@@ -97,7 +118,7 @@ export class PosePanel {
     return next;
   }
 
-  private sides(): Side[] { return this.target === 'both' ? ['left', 'right'] : [this.target]; }
+  private sides(): Side[] { return this.together ? ['left', 'right'] : [this.one]; }
 
   private setValue(id: keyof ArmPose, v: number | undefined): Pose {
     const pose = this.state.pose;
@@ -106,7 +127,7 @@ export class PosePanel {
     return next;
   }
 
-  private shownSide(): Side { return this.target === 'right' ? 'right' : 'left'; }
+  private shownSide(): Side { return this.together ? 'left' : this.one; }
 
   private valueOf(id: keyof ArmPose, side: Side): number {
     const a = this.state.pose[side];
@@ -118,8 +139,14 @@ export class PosePanel {
 
   private render(): void {
     this.el.querySelector('.pp-unavailable')!.classList.toggle('hidden', this.state.available);
-    this.el.querySelectorAll<HTMLElement>('.pp-presets, .pp-side, .pp-sliders, [data-reset]').forEach((e) => e.classList.toggle('disabled-block', !this.state.available));
-    this.el.querySelectorAll<HTMLButtonElement>('.pp-side .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.side === this.target));
+    this.el.querySelectorAll<HTMLElement>('.pp-together, .pp-presets, .pp-side, .pp-sliders, [data-reset]').forEach((e) => e.classList.toggle('disabled-block', !this.state.available));
+    this.el.querySelector<HTMLInputElement>('[data-together]')!.checked = this.together;
+    this.el.querySelector('.pp-together-sub')!.textContent = this.together ? 'Every move is mirrored to the other arm' : 'Off: only one arm moves';
+    this.el.querySelector('.pp-side')!.classList.toggle('hidden', this.together);
+    this.el.querySelectorAll<HTMLButtonElement>('.pp-side .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.side === this.one));
+    this.el.querySelector('.pp-tip')!.textContent = this.together
+      ? 'Drag a green hand ring or yellow elbow ring on the body: both arms follow.'
+      : `Drag a green hand ring or yellow elbow ring: only that arm moves. The sliders below move the ${this.one} arm.`;
     const side = this.shownSide();
     for (const [id, { input, value, reset }] of this.rows) {
       const v = this.valueOf(id, side);

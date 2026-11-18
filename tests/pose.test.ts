@@ -137,6 +137,45 @@ describe('arm posing', () => {
     expect(worst).toBeLessThan(0.03);
   });
 
+  it('keeps the biceps when the elbow bends: no caving in, a slight bulge', () => {
+    // Arm out to the side; measure each front-of-upper-arm vertex's distance
+    // from the posed upper-arm axis, straight and bent.
+    const labels = b.fineLabels, upper = data.meta.parts.indexOf('upperarm.L');
+    const measure = (bend: number) => {
+      b.setPose({ left: { raise: 80, forward: 0, twist: 0, bend, turn: 0 } });
+      const sh = b.posedWorldJoint('left', 'shoulder'), el = b.posedWorldJoint('left', 'elbow');
+      const ax = el.clone().sub(sh); const L = ax.length(); ax.normalize();
+      const P = b.displayPositions();
+      const out = new Map<number, { t: number; r: number; dir: Vector3 }>();
+      for (let v = 0; v < labels.length; v++) {
+        if (labels[v] !== upper) continue;
+        const p = new Vector3(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]).sub(sh);
+        const t = p.dot(ax) / L;
+        const rad = p.clone().sub(ax.clone().multiplyScalar(p.dot(ax)));
+        out.set(v, { t, r: rad.length(), dir: rad.normalize() });
+      }
+      return out;
+    };
+    const straight = measure(0);
+    // The front: where the forearm folds to (the forearm's direction at 90 degrees).
+    b.setPose({ left: { raise: 80, forward: 0, twist: 0, bend: 90, turn: 0 } });
+    const front = b.posedWorldJoint('left', 'wrist').sub(b.posedWorldJoint('left', 'elbow')).normalize();
+    for (const bend of [90, 140]) {
+      const bent = measure(bend);
+      let worst = 0, sum = 0, n = 0;
+      for (const [v, s] of straight) {
+        if (s.t < 0.35 || s.t > 0.8 || s.dir.dot(front) < 0.7) continue;
+        const dr = bent.get(v)!.r - s.r;
+        worst = Math.min(worst, dr); sum += dr; n++;
+      }
+      console.log(`bend ${bend}: biceps ${n} points, mean ${(sum / n * 1000).toFixed(1)} mm, lowest ${(worst * 1000).toFixed(1)} mm`);
+      expect(n).toBeGreaterThan(20);
+      expect(worst).toBeGreaterThan(-0.001); // nothing sinks by more than 1 mm (it was 16 mm at 90, 24 mm at 140)
+      expect(sum / n).toBeGreaterThan(0.0005); // the belly thickens a little
+      expect(sum / n).toBeLessThan(0.006);
+    }
+  });
+
   it('poses fast enough for a live slider', () => {
     const t0 = performance.now();
     for (let i = 0; i < 10; i++) b.setPose(both({ raise: 40 + i * 10, bend: i * 12, turn: i * 9 }));
@@ -200,10 +239,50 @@ describe('dragging joints (inverse kinematics)', () => {
     for (let i = 1; i <= 40; i++) {
       const t = start.clone().add(new Vector3(0.006 * i, 0.012 * i, 0.004 * i));
       const arm = b.solveIK('left', 'wrist', t);
-      for (const k of ['raise', 'forward', 'twist', 'bend'] as const) expect(Math.abs(arm[k] - prev[k]), `${k} step ${i}`).toBeLessThan(12);
+      for (const k of ['raise', 'forward', 'twist', 'bend'] as const) expect(Math.abs(arm[k] - prev[k]), `${k} step ${i}`).toBeLessThan(k === 'bend' ? 12 : 6); // the bend changes fast only as the arm straightens near full reach
       b.setPose({ left: arm });
       prev = arm;
     }
+  });
+
+  it('a biceps curl keeps the elbow in place, and stretching back restores the arm exactly', () => {
+    const start = { raise: 5, forward: 0, twist: 0, bend: 10, turn: 0 };
+    b.setPose({ left: start });
+    const el0 = W('left', 'elbow'), wr0 = W('left', 'wrist');
+    const down = wr0.clone().sub(el0); const fl = down.length(); down.normalize();
+    const fwd = new Vector3(0, 0, 1).sub(down.clone().multiplyScalar(down.z)).normalize();
+    const path = [...Array(41).keys()].map((i) => (i / 40) * 120);
+    let worstElbow = 0;
+    for (const a of [...path, ...path.slice().reverse()]) {
+      const r = (a * Math.PI) / 180;
+      const t = el0.clone().add(down.clone().multiplyScalar(Math.cos(r) * fl)).add(fwd.clone().multiplyScalar(Math.sin(r) * fl));
+      const arm = b.solveIK('left', 'wrist', t, start);
+      b.setPose({ left: arm });
+      expect(W('left', 'wrist').distanceTo(t)).toBeLessThan(0.005);
+      worstElbow = Math.max(worstElbow, W('left', 'elbow').distanceTo(el0));
+    }
+    const end = b.pose.left!;
+    expect(worstElbow).toBeLessThan(0.01);
+    for (const k of ['raise', 'forward', 'twist', 'bend'] as const) expect(Math.abs(end[k]! - start[k]), k).toBeLessThan(1);
+  });
+
+  it('an arm flexed from the side and stretched again returns to how it was', () => {
+    const start = { raise: 90, forward: 0, twist: 0, bend: 0, turn: 0 };
+    b.setPose({ left: start });
+    const el0 = W('left', 'elbow'), wr0 = W('left', 'wrist'), fl = el0.distanceTo(wr0);
+    const out = wr0.clone().sub(el0).normalize();
+    const path = [...Array(41).keys()].map((i) => (i / 40) * 110);
+    for (const a of [...path, ...path.slice().reverse()]) {
+      const r = (a * Math.PI) / 180;
+      const t = el0.clone().add(out.clone().multiplyScalar(Math.cos(r) * fl)).add(new Vector3(0, Math.sin(r) * fl, 0));
+      const prev = { ...(b.pose.left as Required<typeof start>) };
+      const arm = b.solveIK('left', 'wrist', t, start);
+      expect(Math.abs(arm.twist - prev.twist)).toBeLessThan(15); // no sudden spin (it jumped 70 degrees at once)
+      b.setPose({ left: arm });
+    }
+    const end = b.pose.left!;
+    for (const k of ['raise', 'forward', 'twist', 'bend'] as const) expect(Math.abs(end[k]! - start[k]), k).toBeLessThan(1);
+    expect(W('left', 'elbow').distanceTo(el0)).toBeLessThan(0.005);
   });
 
   it('keeps the arm in its realistic range when the target is behind the back', () => {

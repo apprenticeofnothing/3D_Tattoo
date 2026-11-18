@@ -57,10 +57,12 @@ both devices are on the same Wi-Fi.
   with sliders for weight, muscle, torso, arms and legs, plus skin tone.
   Designs stay on the same spot of skin while the body changes. See
   `docs/body-builder.md`.
-- Arm pose: raise, swing, rotate, bend and turn each arm (or both), with
-  quick poses such as "Inner arm" and "Flex", or grab a wrist or elbow
-  ring and drag the arm into place (inverse kinematics within realistic
-  joint limits). Tattoos move with the skin, and placing, dragging and
+- Arm pose: a "Both arms together" switch (mirrored, or one arm at a
+  time); raise, swing, rotate, bend and turn an arm, with quick poses
+  such as "Inner arm" and "Flex", or grab a wrist or elbow ring and drag
+  the arm into place (inverse kinematics within realistic joint limits;
+  the elbow stays put in a curl, and bending and stretching again returns
+  the arm exactly). Tattoos move with the skin, and placing, dragging and
   measuring work on a posed arm.
 - Turning the body: drag the ring on the floor to spin the body, drag up
   or down to tilt it (to see shoulders from above or soles from below),

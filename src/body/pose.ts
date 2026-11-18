@@ -153,71 +153,182 @@ function anglesFor(d: Vector3, lat: number): { raise: number; forward: number } 
   return { raise, forward };
 }
 
+/** Smallest signed difference of two angles in degrees. */
+const angleDiff = (x: number, y: number) => ((((x - y) % 360) + 540) % 360) - 180;
+const smooth01 = (lo: number, hi: number, x: number) => { const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo))); return t * t * (3 - 2 * t); };
+
 /**
  * Inverse kinematics for one arm. `joint` is the joint being dragged:
- *  - 'wrist': two-bone IK places the elbow (keeping its current swivel,
- *    nudged towards a natural down-and-back elbow) and sets raise,
- *    forward, upper-arm rotation and elbow bend so the wrist reaches the
- *    target, within the joint limits;
+ *  - 'wrist': the wrist goes to the target and the arm moves as little as
+ *    it can from `start` (the arm when the drag began): the elbow stays
+ *    where it was if the hand can get there by bending and turning the
+ *    arm, and the upper arm's rotation stays while the arm is nearly
+ *    straight (there it would only spin the arm without moving the hand).
+ *    The result depends only on the target, so a hand dragged out and back
+ *    returns the arm exactly as it was. Within the joint limits.
  *  - 'elbow': the upper arm swings to the target; bend, rotation and turn
  *    stay, so the forearm and hand come along.
  * Positions are in the same frame as `j`. Returns the new pose of that arm.
  */
-export function solveArmIK(j: Joints, pose: Pose, side: Side, joint: 'wrist' | 'elbow', target: Vector3): ArmPose {
+export function solveArmIK(j: Joints, pose: Pose, side: Side, joint: 'wrist' | 'elbow', target: Vector3, start?: Partial<ArmPose>): ArmPose {
   const rest = restArm(j, side);
   const lat = side === 'left' ? 1 : -1;
   const arm = fullArm(rest, pose[side]);
-  const a = rest.elbow.distanceTo(rest.shoulder), b = rest.wrist.distanceTo(rest.elbow);
-  for (let iter = 0; iter < 3; iter++) {
-    const chain = armChain(j, side, rest, arm);
-    const sh = chain.sh;
-    if (joint === 'elbow') {
-      const d = target.clone().sub(sh);
+  if (joint === 'elbow') {
+    for (let iter = 0; iter < 3; iter++) {
+      const d = target.clone().sub(armChain(j, side, rest, arm).sh);
       if (d.lengthSq() < 1e-10) break;
       const ang = anglesFor(d.normalize(), lat);
       arm.raise = clamp(ang.raise, POSE_LIMITS.raise);
       arm.forward = clamp(ang.forward, POSE_LIMITS.forward);
-      continue;
     }
+    return arm;
+  }
+  const ref = fullArm(rest, start ?? pose[side]);
+  const refElbow = armChain(j, side, rest, ref).elbow;
+  const a = rest.elbow.distanceTo(rest.shoulder), b = rest.wrist.distanceTo(rest.elbow);
+  const maxBend = POSE_LIMITS.bend[1];
+  const dMin = Math.sqrt(a * a + b * b - 2 * a * b * Math.cos(rad(180 - maxBend)));
+  let best = { ...arm };
+  for (let iter = 0; iter < 2; iter++) {
+    // The shoulder itself rises with the collarbone for raised arms.
+    const sh = armChain(j, side, rest, best).sh;
     const v = target.clone().sub(sh);
     const dist0 = v.length();
     if (dist0 < 1e-6) break;
     const dir = v.clone().divideScalar(dist0);
-    const maxBend = POSE_LIMITS.bend[1];
-    const dMin = Math.sqrt(a * a + b * b - 2 * a * b * Math.cos(rad(180 - maxBend)));
     const d = Math.min(a + b - 1e-6, Math.max(dMin + 1e-6, dist0));
-    // Elbow on the circle around shoulder->target: keep the current swivel,
-    // nudged towards a natural elbow (down, out and slightly back).
-    const perp = (w: Vector3) => w.clone().sub(dir.clone().multiplyScalar(w.dot(dir)));
-    let pole = perp(chain.elbow.clone().sub(sh));
-    const natural = perp(new Vector3(lat * 0.35, -1, -0.35).normalize());
-    if (pole.lengthSq() < 1e-8) pole = natural.clone();
-    if (natural.lengthSq() > 1e-8) pole = pole.normalize().multiplyScalar(0.8).add(natural.normalize().multiplyScalar(0.2));
-    if (pole.lengthSq() < 1e-8) pole = perp(new Vector3(0, 0, -1));
-    pole.normalize();
     const cosA = Math.min(1, Math.max(-1, (a * a + d * d - b * b) / (2 * a * d)));
     const sinA = Math.sqrt(1 - cosA * cosA);
-    const dU = dir.clone().multiplyScalar(cosA).add(pole.multiplyScalar(sinA)).normalize();
-    const ang = anglesFor(dU, lat);
-    arm.raise = clamp(ang.raise, POSE_LIMITS.raise);
-    arm.forward = clamp(ang.forward, POSE_LIMITS.forward);
-    // With raise and forward fixed (possibly clamped), aim the forearm at the target.
-    const fixed = armChain(j, side, rest, { ...arm, twist: 0 });
-    const upperDir = fixed.dT;
-    const elbowPos = fixed.sh.clone().add(upperDir.clone().multiplyScalar(a));
-    const f = target.clone().sub(elbowPos);
-    if (f.lengthSq() < 1e-10) continue;
-    f.normalize();
-    arm.bend = clamp(deg(upperDir.angleTo(f)), POSE_LIMITS.bend);
-    const kStar = upperDir.clone().cross(f);
-    if (kStar.lengthSq() > 1e-8 && arm.bend > 2) {
-      kStar.normalize();
-      const k0 = fixed.hingeNoTwist.clone().sub(upperDir.clone().multiplyScalar(fixed.hingeNoTwist.dot(upperDir))).normalize();
-      const twRad = Math.atan2(upperDir.dot(k0.clone().cross(kStar)), k0.dot(kStar));
-      arm.twist = clamp(-lat * deg(twRad), POSE_LIMITS.twist);
+    const centre = sh.clone().add(dir.clone().multiplyScalar(a * cosA));
+    // The elbow is on a circle around the shoulder-to-target line. Swivel
+    // angle 0 is the point nearest the elbow the drag started with.
+    const perp = (x: Vector3) => x.clone().sub(dir.clone().multiplyScalar(x.dot(dir)));
+    let u = perp(refElbow.clone().sub(sh));
+    if (u.lengthSq() < 1e-10) u = perp(new Vector3(lat * 0.35, -1, -0.35));
+    if (u.lengthSq() < 1e-10) u = perp(new Vector3(0, 0, -1));
+    u.normalize();
+    const w = dir.clone().cross(u);
+    // Elbow bend from the triangle; the upper arm's rotation only moves the
+    // hand once the elbow is bent, so near straight it is kept as it was.
+    const bendGeom = 180 - deg(Math.acos(Math.min(1, Math.max(-1, (a * a + b * b - d * d) / (2 * a * b)))));
+    const twistWeight = 0.03 + 1.5 * (1 - smooth01(5, 45, bendGeom));
+    const evaluate = (psi: number) => {
+      const e = centre.clone().add(u.clone().multiplyScalar(a * sinA * Math.cos(psi))).add(w.clone().multiplyScalar(a * sinA * Math.sin(psi)));
+      const ang = anglesFor(e.sub(sh).normalize(), lat);
+      const raise = clamp(ang.raise, POSE_LIMITS.raise);
+      const cand: ArmPose = { ...arm, raise, forward: clamp(ang.forward, forwardRange(raise)), twist: ref.twist };
+      // With raise and forward fixed (possibly clamped), aim the forearm at the target.
+      const fixed = armChain(j, side, rest, { ...cand, twist: 0 });
+      const upperDir = fixed.dT;
+      const elbowPos = fixed.sh.clone().add(upperDir.clone().multiplyScalar(a));
+      const f = target.clone().sub(elbowPos);
+      if (f.lengthSq() > 1e-12) {
+        f.normalize();
+        cand.bend = clamp(deg(upperDir.angleTo(f)), POSE_LIMITS.bend);
+        const kStar = upperDir.clone().cross(f);
+        if (kStar.lengthSq() > 1e-10) {
+          kStar.normalize();
+          const k0 = fixed.hingeNoTwist.clone().sub(upperDir.clone().multiplyScalar(fixed.hingeNoTwist.dot(upperDir))).normalize();
+          const twRad = Math.atan2(upperDir.dot(k0.clone().cross(kStar)), k0.dot(kStar));
+          cand.twist = clamp(-lat * deg(twRad), POSE_LIMITS.twist);
+        }
+      }
+      const c = armChain(j, side, rest, cand);
+      const wrist = apply(c.F0, rest.wrist);
+      const cost = 60 * wrist.distanceToSquared(target) / (a * a)
+        + c.elbow.distanceToSquared(refElbow) / (a * a)
+        + twistWeight * (angleDiff(cand.twist, ref.twist) / 180) ** 2;
+      return { cand, cost };
+    };
+    // Follow the cost downhill from the current swivel, so the arm moves
+    // continuously and never flips to a far-off elbow position. A straight
+    // arm has no swivel yet: there the best point on the circle is taken.
+    const N = 72, step = (2 * Math.PI) / N;
+    const costs = Array.from({ length: N }, (_, k) => evaluate(k * step).cost);
+    const cur = armChain(j, side, rest, arm);
+    const ce = perp(cur.elbow.clone().sub(centre));
+    let bi = 0;
+    if (arm.bend > 3 && sinA > 0.05 && ce.length() > 0.2 * a * sinA) {
+      bi = ((Math.round(Math.atan2(ce.dot(w), ce.dot(u)) / step) % N) + N) % N;
+      for (let guard = 0; guard < N; guard++) {
+        const l = (bi + N - 1) % N, r = (bi + 1) % N;
+        const nb = costs[l] < costs[r] ? l : r;
+        if (costs[nb] >= costs[bi]) break;
+        bi = nb;
+      }
+    } else {
+      for (let k = 1; k < N; k++) if (costs[k] < costs[bi]) bi = k;
     }
+    let lo = step * (bi - 1), hi = step * (bi + 1);
+    const g = (Math.sqrt(5) - 1) / 2;
+    let x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo), f1 = evaluate(x1).cost, f2 = evaluate(x2).cost;
+    for (let k = 0; k < 16; k++) {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - g * (hi - lo); f1 = evaluate(x1).cost; }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + g * (hi - lo); f2 = evaluate(x2).cost; }
+    }
+    best = evaluate((lo + hi) / 2).cand;
   }
-  return arm;
+  return best;
+}
+
+/**
+ * Plane-of-elevation range for an upper arm raised by `raise` degrees. A
+ * hanging arm can point anywhere around (the angle hardly means anything
+ * there); a raised one cannot go far behind the body.
+ */
+function forwardRange(raise: number): [number, number] {
+  const s = smooth01(25, 60, raise);
+  return [POSE_LIMITS.forward[0] - 80 * (1 - s), POSE_LIMITS.forward[1] + 50 * (1 - s)];
+}
+
+/**
+ * Biceps bulge for elbow flexion, as a pose corrective on the rest shape.
+ * A bending elbow shortens the biceps, and a muscle keeps its volume, so
+ * its belly thickens. Skinning alone cannot do that. Front-of-arm vertices
+ * between 30% and 92% of the way from shoulder to elbow move outward, most
+ * at 62% (the belly) and straight at the front, by `BICEPS_BULGE_M` at
+ * full bend. This is an approximation of a relaxed arm: a tensed biceps
+ * bulges more.
+ */
+export const BICEPS_BULGE_M = 0.005;
+
+export interface Bulge { index: Uint32Array; dir: Float32Array }
+
+/** Per-vertex bulge direction times profile (native units per metre of bulge). */
+export function bicepsBulge(coarse: Float32Array, labels: Uint8Array, parts: string[], j: Joints, side: Side, metresPerUnit: number): Bulge {
+  const S = sideSuffix(side);
+  const rest = restArm(j, side);
+  const upperPart = parts.indexOf(`upperarm.${S}`);
+  const dU = rest.elbow.clone().sub(rest.shoulder);
+  const L = dU.length(); dU.normalize();
+  const dF = rest.wrist.clone().sub(rest.elbow).normalize();
+  const front = dF.clone().sub(dU.clone().multiplyScalar(dF.dot(dU))).normalize();
+  const idx: number[] = [], dir: number[] = [];
+  const p = new Vector3();
+  for (let v = 0; v < labels.length; v++) {
+    if (labels[v] !== upperPart) continue;
+    p.set(coarse[v * 3], coarse[v * 3 + 1], coarse[v * 3 + 2]).sub(rest.shoulder);
+    const t = p.dot(dU) / L;
+    if (t <= 0.3 || t >= 0.92) continue;
+    const radial = p.clone().sub(dU.clone().multiplyScalar(p.dot(dU)));
+    const r = radial.length();
+    if (r < 1e-9) continue;
+    radial.divideScalar(r);
+    const c = radial.dot(front);
+    if (c <= 0) continue;
+    const along = Math.sin((Math.PI * (t - 0.3)) / 0.62) ** 2;
+    const k = (along * c * c) / metresPerUnit;
+    idx.push(v); dir.push(radial.x * k, radial.y * k, radial.z * k);
+  }
+  return { index: Uint32Array.from(idx), dir: Float32Array.from(dir) };
+}
+
+/** Bulge amount (metres) for an arm pose: none up to the modelled bend, full at 150 degrees. */
+export function bulgeAmount(rest: RestArm, arm: Partial<ArmPose> | undefined): number {
+  const bend = arm?.bend ?? rest.bend;
+  const span = POSE_LIMITS.bend[1] - rest.bend;
+  return span > 0 ? BICEPS_BULGE_M * Math.min(1, Math.max(0, (bend - rest.bend) / span)) : 0;
 }
 
 /** Posed joint positions (for tests and the camera). */

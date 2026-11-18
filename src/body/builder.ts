@@ -11,7 +11,7 @@ import { applyStencil, buildCatmullClark, quadsToTriangles, type Stencil } from 
 import { computeNormals } from '../mesh/marchingCubes';
 import { surfaceFromIndexed, type SurfaceMesh } from '../mesh/topology';
 import { Vector3 } from 'three';
-import { boneTransforms, isRestPose, jointPositions, posedJoints, restArm, skinDQS, solveArmIK, type ArmPose, type Joints, type Pose, type RestArm, type Side } from './pose';
+import { bicepsBulge, boneTransforms, bulgeAmount, isRestPose, jointPositions, posedJoints, restArm, skinDQS, solveArmIK, type ArmPose, type Bulge, type Joints, type Pose, type RestArm, type Side } from './pose';
 
 export const BUILDER_TOPOLOGY = 'makehuman-hm08-body+eyes/cc1';
 const DENSITY = 1010; // kg/m^3
@@ -296,6 +296,9 @@ export class BuilderBody {
   /** Displayed (posed) fine positions; the geometry's position attribute. */
   private fine: Float32Array;
   private posedCoarse: Float32Array;
+  /** Rest shape plus the biceps bulge of the current pose (the skinning input). */
+  private bulgedCoarse: Float32Array;
+  private bulges: Record<Side, Bulge> | null = null;
   private norm = { cx: 0, cz: 0, minY: 0, s: 1 };
   private joints: Joints = {};
   readonly tris: Uint32Array;
@@ -309,6 +312,7 @@ export class BuilderBody {
     for (let i = 0; i < this.stencil.fineCount; i++) this.fineLabels[i] = data.labels[this.stencil.dominant[i]];
     this.coarse = new Float32Array(data.base.length);
     this.posedCoarse = new Float32Array(data.base.length);
+    this.bulgedCoarse = new Float32Array(data.base.length);
     this.fine = new Float32Array(this.stencil.fineCount * 3);
     this.restFine = new Float32Array(this.stencil.fineCount * 3);
     this.coarseColors = new Float32Array(data.meta.vertexCount * 3);
@@ -347,6 +351,10 @@ export class BuilderBody {
     }
     this.norm = { cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2, minY, s: heightM / (maxY - minY) };
     this.normaliseInPlace(this.restFine);
+    this.bulges = {
+      left: bicepsBulge(this.coarse, this.data.labels, this.data.meta.parts, this.joints, 'left', this.norm.s),
+      right: bicepsBulge(this.coarse, this.data.labels, this.data.meta.parts, this.joints, 'right', this.norm.s),
+    };
     this.applyPose();
   }
 
@@ -377,10 +385,10 @@ export class BuilderBody {
   }
 
   /** Arm pose that brings the dragged joint as close as it can to a world-space target. */
-  solveIK(side: Side, joint: 'wrist' | 'elbow', worldTarget: Vector3): ArmPose {
+  solveIK(side: Side, joint: 'wrist' | 'elbow', worldTarget: Vector3, start?: Partial<ArmPose>): ArmPose {
     const { cx, cz, minY, s } = this.norm;
     const t = new Vector3(worldTarget.x / s + cx, worldTarget.y / s + minY, worldTarget.z / s + cz);
-    return solveArmIK(this.joints, this.pose, side, joint, t);
+    return solveArmIK(this.joints, this.pose, side, joint, t, start);
   }
 
   /** Displayed (posed) positions of the fine vertices; same ids as the rest surface. */
@@ -408,7 +416,18 @@ export class BuilderBody {
       this.fine.set(this.restFine);
     } else {
       const T = boneTransforms(this.joints, this.pose, this.data.meta.poseBones);
-      skinDQS(this.coarse, this.posedCoarse, this.data.meta.vertexCount, this.data.skinBones, this.data.skinWeights, T, this.skinMix);
+      let src = this.coarse;
+      for (const side of ['left', 'right'] as Side[]) {
+        const m = bulgeAmount(restArm(this.joints, side), this.pose[side]);
+        const bulge = this.bulges?.[side];
+        if (m <= 0 || !bulge) continue;
+        if (src === this.coarse) { this.bulgedCoarse.set(this.coarse); src = this.bulgedCoarse; }
+        for (let k = 0; k < bulge.index.length; k++) {
+          const o = bulge.index[k] * 3;
+          src[o] += bulge.dir[k * 3] * m; src[o + 1] += bulge.dir[k * 3 + 1] * m; src[o + 2] += bulge.dir[k * 3 + 2] * m;
+        }
+      }
+      skinDQS(src, this.posedCoarse, this.data.meta.vertexCount, this.data.skinBones, this.data.skinWeights, T, this.skinMix);
       applyStencil(this.stencil, this.posedCoarse, 3, this.fine);
       this.normaliseInPlace(this.fine);
     }

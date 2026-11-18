@@ -33,15 +33,22 @@ the armpit or the back of the arm can be seen properly.
 - **Quick poses:** Relaxed (as modelled), Arms down, Arms out, Inner arm
   (palms up, arms forward; the camera turns to the inner forearm), Flex,
   Arm up.
+- **Both arms together** (switch at the top of the panel). On: every
+  drag, slider and quick pose is mirrored to the other arm. Off: only one
+  arm moves. Grabbing an arm on the body makes it the arm the sliders
+  edit, or pick it with "Left arm" / "Right arm". The choice is remembered.
 - **Drag the arm itself:** with the panel open, green rings sit on the
   wrists and yellow rings on the elbows. Grab a wrist ring and move it:
-  the elbow finds a natural position (it keeps its current swivel, nudged
-  towards down-and-back) and every joint stays within its limits; a
-  target out of reach straightens the arm towards it. Grab an elbow ring
-  and the upper arm swings there while the forearm keeps its bend and
-  twist. With "Both arms" selected, the other arm mirrors the movement.
-  Works with a mouse and with a finger.
-- **Sliders**, for both arms together or each arm separately: raise arm
+  the arm moves as little as it can from where it was when you grabbed
+  it. If the hand can get there by bending the elbow and turning the
+  arm, the elbow stays put, as in a biceps curl. While the arm is nearly
+  straight its rotation is kept, since there it would only spin the arm.
+  The result depends only on where the hand is, so bending and
+  stretching again brings the arm back exactly as it was. Every joint
+  stays within its limits; a target out of reach straightens the arm
+  towards it. Grab an elbow ring and the upper arm swings there while the
+  forearm keeps its bend and twist. Works with a mouse and with a finger.
+- **Sliders** (both arms or the chosen one, as the switch says): raise arm
   (0° hanging, 90° out to the side, up to 160°), arm forward or behind,
   rotate upper arm inward or outward, bend elbow (0° straight to 150°),
   and turn forearm (palm down to palm up).
@@ -63,9 +70,25 @@ elevation, and the skin follows by blending MakeHuman's bone weights.
 Arms and twists use dual-quaternion skinning, so a turned forearm keeps
 its volume. Where the arm meets the trunk, linear blending is used
 instead, because dual quaternions balloon the armpit there.
-MakeHuman's weights were repaired so the side of the chest no longer
-follows the upper arm (they fade out 4 to 8 cm from the shoulder joint),
-and smoothed around the shoulders.
+MakeHuman's weights were repaired in two places:
+- **Shoulders.** The side of the chest no longer follows the upper arm:
+  the arm's influence fades out 4 to 8 cm from the shoulder joint, and
+  the weights are smoothed around the shoulders.
+- **Elbows.** MakeHuman let the forearm pull on the front of the upper
+  arm up to halfway to the shoulder. A bending elbow then turned that skin
+  about the elbow and sank it into the arm: on the athletic male the
+  biceps caved in by 7 mm on average (16 mm at worst) at 90°, and 11 mm
+  (24 mm) at 140°. Now the forearm only pulls on the front and
+  sides of the arm within a band from 2 cm above the elbow crease to 3 cm
+  below it. The back of the elbow keeps MakeHuman's wider blend, which
+  rounds the point of the elbow.
+- **Biceps bulge.** Bending the elbow shortens the biceps, which then
+  thickens. Skinning cannot do that, so the front of the upper arm is
+  pushed outward a little before skinning, most at the belly (about 60%
+  of the way from shoulder to elbow), by up to 5 mm at full bend. Measured
+  on the athletic male: +1.0 mm on average at 90°, +2.2 mm at 140°, and no
+  point on the biceps sinks. The amount is an estimate for a relaxed arm;
+  a tensed biceps bulges more.
 
 ## Designs stay on the same spot
 
@@ -99,7 +122,8 @@ what a real tattoo does when a body changes.
   A-pose; fingers and wrist do not bend.
 - Skin deformation is skinning, not simulation: the armpit stretches into
   a smooth web when the arm is raised, and a fully bent elbow can
-  interpenetrate slightly. Muscles do not bulge when flexed.
+  interpenetrate slightly at the crease. The biceps bulge is a fixed
+  estimate, not a muscle model; other muscles do not bulge.
 - Height is a uniform scale of the body. The MakeHuman package used here
   has no separate height targets, so a tall body has the same proportions
   as an average one; use the leg, arm and torso length sliders to adjust.
