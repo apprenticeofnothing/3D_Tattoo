@@ -42,6 +42,26 @@ PARTS = ['head', 'neck', 'torso', 'shoulder.L', 'shoulder.R', 'upperarm.L', 'upp
          'hand.L', 'hand.R', 'thigh.L', 'thigh.R', 'shin.L', 'shin.R', 'foot.L', 'foot.R']
 MATERIALS = ['skin', 'sclera', 'iris', 'pupil']
 
+# Bones the app can pose (per side), in this order; everything else stays put.
+POSE_BONES = ['clavicle', 'shoulder01', 'upperarm01', 'upperarm02', 'lowerarm01', 'lowerarm02', 'wrist', 'hand']
+# Joints exported (MakeHuman joint names, head/tail of bones), per side.
+POSE_JOINTS = ['clavicle____head', 'shoulder01____head', 'upperarm01____head', 'upperarm02____head', 'lowerarm01____head',
+               'lowerarm02____head', 'wrist____head', 'wrist____tail', 'finger1-1____head', 'finger2-1____head', 'finger5-1____head']
+
+
+def pose_bone_id(mh_name):
+    """0 = static; 1..8 left arm bones; 9..16 right arm bones."""
+    n = mh_name.replace('____head', '')
+    if not (n.endswith('.L') or n.endswith('.R')):
+        return 0
+    side = 0 if n.endswith('.L') else 1
+    b = n[:-2]
+    if b.startswith(('metacarpal', 'finger')):
+        b = 'hand'
+    if b not in POSE_BONES:
+        return 0
+    return 1 + side * len(POSE_BONES) + POSE_BONES.index(b)
+
 # Detail sliders: id -> list of target stems (each has -decr and -incr variants).
 DETAIL_TARGETS = {
     'shoulders': ['measure/measure-shoulder-dist'],
@@ -126,6 +146,7 @@ def macro_targets(gender, muscle, weight, cup, firmness, races=None):
 
 def parse_base(path):
     d = json.load(open(path))
+    joint_idx = d['metadata']['joint_pos_idxs']
     verts = np.array(d['vertices'], dtype=np.float64).reshape(-1, 3)
     mats = [m['DbgName'] for m in d['materials']]
     nuv = len(d['uvs'])
@@ -154,7 +175,7 @@ def parse_base(path):
     bones = [b['name'] for b in d['bones']]
     skin_idx = np.array(d['skinIndices'], dtype=np.int64).reshape(-1, 4)
     skin_w = np.array(d['skinWeights'], dtype=np.float64).reshape(-1, 4)
-    return verts, np.array(quads, dtype=np.int64), quad_mat, bones, skin_idx, skin_w
+    return verts, np.array(quads, dtype=np.int64), quad_mat, bones, skin_idx, skin_w, joint_idx
 
 
 def bone_part(name):
@@ -194,7 +215,7 @@ def main():
     ap.add_argument('--out', required=True)
     args = ap.parse_args()
 
-    base, quads, quad_mat, bones, skin_idx, skin_w = parse_base(args.base)
+    base, quads, quad_mat, bones, skin_idx, skin_w, joint_idx = parse_base(args.base)
     T = Targets(args.targets)
 
     keep_groups = {'body', 'helper-l-eye', 'helper-r-eye'}
@@ -202,12 +223,27 @@ def main():
     kept_mats = [m for m in quad_mat if m in keep_groups]
     q_orig = quads[keep]
     used = np.unique(q_orig)
+    # Joint positions are means of vertex groups, partly hidden helper vertices.
+    # Those are appended after the rendered vertices so targets move them too.
+    joint_names = [f'{j.split("____")[0]}.{side}____{j.split("____")[1]}' for side in ('L', 'R') for j in POSE_JOINTS]
+    joint_src = {n: joint_idx[n] for n in joint_names}
+    extra = sorted(set(i for idx in joint_src.values() for i in idx) - set(used.tolist()))
+    ext = np.concatenate([used, np.array(extra, dtype=np.int64)])
     remap = -np.ones(len(base), dtype=np.int64)
-    remap[used] = np.arange(len(used))
+    remap[ext] = np.arange(len(ext))
     q = remap[q_orig]
     nv = len(used)
+    n_total = len(ext)
     is_body = np.array([m == 'body' for m in kept_mats])
 
+    # Arm skin weights per rendered vertex, starting from MakeHuman's weights.
+    n_pose = 1 + 2 * len(POSE_BONES)
+    pose_of_bone = [pose_bone_id(b) for b in bones]
+    W = np.zeros((nv, n_pose))
+    for j in range(4):
+        np.add.at(W, (np.arange(nv), [pose_of_bone[b] for b in skin_idx[used, j]]), skin_w[used, j])
+    W /= np.maximum(W.sum(axis=1, keepdims=True), 1e-12)
+    skin_report = None
     part_of_bone = [bone_part(b) for b in bones]
     dom = skin_idx[used, np.argmax(skin_w[used], axis=1)]
     labels = np.array([PARTS.index(part_of_bone[b]) for b in dom], dtype=np.uint8)
@@ -233,6 +269,60 @@ def main():
         s = ref_h / 100.0 / (p[:, 1].max() - p[:, 1].min())
         vol = abs(signed_volume(p * s, tris_body))
         return DENSITY * vol / (ref_h / 100.0) ** 2, vol
+
+    # ---------- arm weight repair ----------
+    # MakeHuman ties the side of the chest under the armpit about 50% to the
+    # upper arm, which drags the flank up when the arm rises. On torso, neck
+    # and head vertices, fade the arm's influence out between 4 and 8 cm from
+    # the shoulder joint (collarbone and shoulder bones keep theirs), then
+    # smooth the weights around the shoulders to avoid creases.
+    neutral = shape(0.5, 0.5, 0.5, 0.5, 0.5)
+    ext_pos = build_full(macro_targets(0.5, 0.5, 0.5, 0.5, 0.5))[ext] * DM_TO_M
+    def joint(name):
+        return ext_pos[[remap[i] for i in joint_src[name]]].mean(axis=0)
+    body_labels = {PARTS.index(x) for x in ('torso', 'neck', 'head')}
+    trunk = np.array([l in body_labels for l in labels])
+    pos_r = ext_pos[:nv]
+    region = np.zeros(nv, dtype=bool)
+    for side_i, side in enumerate(('L', 'R')):
+        shj = joint(f'upperarm01.{side}____head')
+        d = np.linalg.norm(pos_r - shj, axis=1)
+        f = np.clip((0.08 - d) / (0.08 - 0.04), 0.0, 1.0)
+        f = f * f * (3 - 2 * f)
+        arm_ids = [1 + side_i * len(POSE_BONES) + POSE_BONES.index(b) for b in POSE_BONES if b not in ('clavicle', 'shoulder01')]
+        for a in arm_ids:
+            removed = W[trunk, a] * (1 - f[trunk])
+            W[trunk, a] -= removed
+            W[trunk, 0] += removed
+        region |= d < 0.2
+    region &= labels != PARTS.index('head')
+    # Laplacian smoothing of weights in the shoulder regions (rendered skin only).
+    nbr = [[] for _ in range(nv)]
+    for f4 in q:
+        for k in range(4):
+            a_, b_ = int(f4[k]), int(f4[(k + 1) % 4])
+            if a_ < nv and b_ < nv:
+                nbr[a_].append(b_); nbr[b_].append(a_)
+    idx_region = np.nonzero(region)[0]
+    for _ in range(4):
+        W2 = W.copy()
+        for v in idx_region:
+            if nbr[v]:
+                W2[v] = 0.5 * W[v] + 0.5 * W[nbr[v]].mean(axis=0)
+        W = W2
+    # Top four pose bones per vertex, quantised to uint8 summing to 255.
+    skin_ids = np.zeros((nv, 4), dtype=np.uint8)
+    skin_wts = np.zeros((nv, 4), dtype=np.uint8)
+    order = np.argsort(-W, axis=1)[:, :4]
+    for v in range(nv):
+        top = [(int(b), W[v, b]) for b in order[v] if W[v, b] > 1e-4]
+        tot = sum(w for _, w in top) or 1.0
+        q8 = [int(round(255 * w / tot)) for _, w in top]
+        if q8:
+            q8[0] += 255 - sum(q8)
+        for k, ((b, _), w8) in enumerate(zip(top, q8)):
+            skin_ids[v, k] = b
+            skin_wts[v, k] = w8
 
     # ---------- presets ----------
     preset_meta, report = [], []
@@ -278,17 +368,20 @@ def main():
         offset += len(b) + pad
         return start
 
-    base_m = (base[used] * DM_TO_M).astype(np.float32)
+    base_m = (base[ext] * DM_TO_M).astype(np.float32)
     meta = {
         'version': 2,
         'topology': 'makehuman-hm08-body+eyes',
-        'vertexCount': int(nv), 'quadCount': int(len(q)),
+        'vertexCount': int(nv), 'totalVertexCount': int(n_total), 'quadCount': int(len(q)),
         'parts': PARTS, 'materials': MATERIALS,
         'deltaUnitM': TARGET_SCALE * DM_TO_M,
         'buffers': {
             'base': add(base_m), 'quads': add(q.astype(np.uint16)),
             'labels': add(labels), 'material': add(material), 'bodyQuad': add(is_body.astype(np.uint8)),
+            'skinBones': add(skin_ids), 'skinWeights': add(skin_wts),
         },
+        'poseBones': POSE_BONES,
+        'joints': {n: [int(remap[i]) for i in idx] for n, idx in joint_src.items()},
         'targets': {},
     }
     needed = set()
@@ -336,6 +429,7 @@ def main():
     print(f'vertices {nv}, quads {len(q)}, targets {len(meta["targets"])} (absent/empty macro or breast combos: {len(missing)}), '
           f'raw {len(raw) / 1024:.0f} kB, compressed {os.path.getsize(os.path.join(args.out, "makehuman.bin.z")) / 1024:.0f} kB')
     print('material counts', {MATERIALS[i]: int((material == i).sum()) for i in range(len(MATERIALS))})
+    print(f'joint helper vertices appended: {len(extra)}; vertices with arm weights: {int((skin_ids != 0).any(axis=1).sum())}')
 
 
 def is_vertex_of(q, mask, nv):

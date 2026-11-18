@@ -119,3 +119,7 @@ input[type=range] { width: 140px; min-height: var(--tap); accent-color: var(--ac
 /* While shaping the body the design panel steps aside so the body stays visible. */
 #stage.body-open .panel { display: none; }
 @media (min-width: 701px) { #stage.body-open .measure-bar { right: 416px; } }
+.pp-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.pp-side { margin-bottom: 8px; }
+.disabled-block { opacity: .45; pointer-events: none; }
+.pp-tip { margin: 8px 2px 0; padding: 10px 12px; border-radius: 12px; background: #24324a; font-size: 14px; }

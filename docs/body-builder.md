@@ -25,6 +25,48 @@ scan) always replaces it.
 
 Every setting is saved in the browser and inside saved project files.
 
+## Arm pose
+
+Open **Arm pose** to move the arms, so tattoos on the inside of the arm,
+the armpit or the back of the arm can be seen properly.
+
+- **Quick poses:** Relaxed (as modelled), Arms down, Arms out, Inner arm
+  (palms up, arms forward; the camera turns to the inner forearm), Flex,
+  Arm up.
+- **Drag the arm itself:** with the panel open, green rings sit on the
+  wrists and yellow rings on the elbows. Grab a wrist ring and move it:
+  the elbow finds a natural position (it keeps its current swivel, nudged
+  towards down-and-back) and every joint stays within its limits; a
+  target out of reach straightens the arm towards it. Grab an elbow ring
+  and the upper arm swings there while the forearm keeps its bend and
+  twist. With "Both arms" selected, the other arm mirrors the movement.
+  Works with a mouse and with a finger.
+- **Sliders**, for both arms together or each arm separately: raise arm
+  (0° hanging, 90° out to the side, up to 160°), arm forward or behind,
+  rotate upper arm inward or outward, bend elbow (0° straight to 150°),
+  and turn forearm (palm down to palm up).
+- **Tattoos move with the skin.** A design is anchored to the skin of the
+  relaxed body and carried by the same skin when the arm moves, twists or
+  bends, like a real tattoo. You can place, drag, rotate, scale and measure
+  on a posed arm; everything lands where you tap.
+- **Size and stretch are measured on the relaxed body.** The stencil
+  heatmap and the centimetre sizes describe the design as applied, not
+  the extra stretch of skin in a pose.
+- The pose is saved with the body and in project files. Arm posing works on
+  built bodies only; a loaded scan keeps the pose it was captured in.
+
+How it works: MakeHuman's skeleton gives the shoulder, elbow and wrist
+joints, which follow every shape slider (they are averages of hidden
+helper vertices that the morph targets move too). The arm is posed by
+forward kinematics, with the collarbone joining in above about 60° of
+elevation, and the skin follows by blending MakeHuman's bone weights.
+Arms and twists use dual-quaternion skinning, so a turned forearm keeps
+its volume. Where the arm meets the trunk, linear blending is used
+instead, because dual quaternions balloon the armpit there.
+MakeHuman's weights were repaired so the side of the chest no longer
+follows the upper arm (they fade out 4 to 8 cm from the shoulder joint),
+and smoothed around the shoulders.
+
 ## Designs stay on the same spot
 
 The body is always the same mesh with the same triangles, only moved. A
@@ -53,7 +95,11 @@ what a real tattoo does when a body changes.
 
 ## Honest limits
 
-- One pose: MakeHuman's A-pose. No bending, sitting or flexing.
+- Only the arms move. Legs, spine, head and hands keep MakeHuman's
+  A-pose; fingers and wrist do not bend.
+- Skin deformation is skinning, not simulation: the armpit stretches into
+  a smooth web when the arm is raised, and a fully bent elbow can
+  interpenetrate slightly. Muscles do not bulge when flexed.
 - Height is a uniform scale of the body. The MakeHuman package used here
   has no separate height targets, so a tall body has the same proportions
   as an average one; use the leg, arm and torso length sliders to adjust.

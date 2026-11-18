@@ -57,6 +57,11 @@ both devices are on the same Wi-Fi.
   with sliders for weight, muscle, torso, arms and legs, plus skin tone.
   Designs stay on the same spot of skin while the body changes. See
   `docs/body-builder.md`.
+- Arm pose: raise, swing, rotate, bend and turn each arm (or both), with
+  quick poses such as "Inner arm" and "Flex", or grab a wrist or elbow
+  ring and drag the arm into place (inverse kinematics within realistic
+  joint limits). Tattoos move with the skin, and placing, dragging and
+  measuring work on a posed arm.
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

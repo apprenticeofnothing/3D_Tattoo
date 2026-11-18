@@ -53,7 +53,7 @@ export class PlacedDesign {
   get heightM(): number { return this.widthM / this.placement.design.aspect; }
 
   /** Recompute everything for the current placement on the given surface. */
-  update(surface: SurfaceMesh, exact = true): PlacementResult {
+  update(surface: SurfaceMesh, exact = true, display?: Float32Array): PlacementResult {
     const t0 = performance.now();
     const p = this.placement;
     const bary = barycentric(surface, p.tri, p.point);
@@ -77,7 +77,7 @@ export class PlacedDesign {
     const summary = summarize(triangleStretch(surface, patch), surface, patchClippedToDesign(patch, surface, widthM, heightM, p.wrap, circumference), 0.05, vs);
     this.decal.setOpacity(p.opacity);
     this.decal.setMode(p.mode);
-    this.decal.build(surface, patch, { width: widthM, height: heightM, mirror: p.mirror, wrap: p.wrap, circumference: circumference ?? 0 }, vs);
+    this.decal.build(surface, patch, { width: widthM, height: heightM, mirror: p.mirror, wrap: p.wrap, circumference: circumference ?? 0 }, vs, display);
     this.locator = null;
     this.result = { patch, summary, circumferenceM: circumference, heightCm: heightM * 100, computeMs: performance.now() - t0, exact, rotation: p.rotation };
     return this.result;
@@ -89,16 +89,30 @@ export class PlacedDesign {
     return this.locator;
   }
 
-  /** Surface point for a design-plane coordinate (metres), if inside the patch. */
-  surfacePoint(surface: SurfaceMesh, u: number, v: number, lift = 0): [number, number, number] | null {
+  /**
+   * Point for a design-plane coordinate (metres), if inside the patch. With
+   * `display`, the point is placed on the displayed (posed) body instead of
+   * the rest pose, at the same spot of skin.
+   */
+  surfacePoint(surface: SurfaceMesh, u: number, v: number, lift = 0, display?: Float32Array): [number, number, number] | null {
     const hit = this.getLocator(surface)?.locateTri(u, v);
     if (!hit) return null;
-    if (lift === 0) return hit.point;
-    const I = surface.indices, N = surface.normals;
+    const I = surface.indices;
+    const P = display ?? surface.positions;
     const a = I[hit.tri * 3] * 3, b = I[hit.tri * 3 + 1] * 3, c = I[hit.tri * 3 + 2] * 3;
-    const nx = N[a] + N[b] + N[c], ny = N[a + 1] + N[b + 1] + N[c + 1], nz = N[a + 2] + N[b + 2] + N[c + 2];
+    const w = hit.bary;
+    const pt: [number, number, number] = display
+      ? [w[0] * P[a] + w[1] * P[b] + w[2] * P[c], w[0] * P[a + 1] + w[1] * P[b + 1] + w[2] * P[c + 1], w[0] * P[a + 2] + w[1] * P[b + 2] + w[2] * P[c + 2]]
+      : hit.point;
+    if (lift === 0) return pt;
+    // Face normal of the (possibly posed) triangle.
+    const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
+    const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
+    let nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    const N = surface.normals;
+    if (nx * (N[a] + N[b] + N[c]) + ny * (N[a + 1] + N[b + 1] + N[c + 1]) + nz * (N[a + 2] + N[b + 2] + N[c + 2]) < 0 && !display) { nx = -nx; ny = -ny; nz = -nz; }
     const l = Math.hypot(nx, ny, nz) || 1;
-    return [hit.point[0] + (nx / l) * lift, hit.point[1] + (ny / l) * lift, hit.point[2] + (nz / l) * lift];
+    return [pt[0] + (nx / l) * lift, pt[1] + (ny / l) * lift, pt[2] + (nz / l) * lift];
   }
 
   /** Design-plane coordinate (metres) of a surface point in triangle `tri`, or null if outside the patch. */
@@ -116,7 +130,7 @@ export class PlacedDesign {
   }
 
   /** Outline of the design rectangle on the skin, as a closed 3D polyline (may have gaps as nulls). */
-  outline(surface: SurfaceMesh, step = 0.004): Array<[number, number, number] | null> {
+  outline(surface: SurfaceMesh, step = 0.004, display?: Float32Array): Array<[number, number, number] | null> {
     const W = this.widthM, H = this.heightM;
     const wrap = this.placement.wrap;
     const pts: Array<[number, number, number] | null> = [];
@@ -127,7 +141,7 @@ export class PlacedDesign {
       const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
       for (let k = 0; k < n; k++) {
         const t = k / n;
-        pts.push(this.surfacePoint(surface, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.0015));
+        pts.push(this.surfacePoint(surface, a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.0015, display));
       }
     }
     pts.push(pts[0]);
@@ -135,13 +149,13 @@ export class PlacedDesign {
   }
 
   /** 3D positions of the rotate handle (above the top edge) and the scale handle (bottom-right corner). */
-  handles(surface: SurfaceMesh): { rotate: [number, number, number] | null; scale: [number, number, number] | null; center: [number, number, number] | null } {
+  handles(surface: SurfaceMesh, display?: Float32Array): { rotate: [number, number, number] | null; scale: [number, number, number] | null; center: [number, number, number] | null } {
     const W = this.widthM, H = this.heightM;
     const sx = this.placement.mirror ? -1 : 1;
     return {
-      rotate: this.surfacePoint(surface, 0, H / 2 + ROTATE_HANDLE_GAP, 0.003),
-      scale: this.surfacePoint(surface, sx * W / 2, -H / 2, 0.003),
-      center: this.surfacePoint(surface, 0, 0, 0.003),
+      rotate: this.surfacePoint(surface, 0, H / 2 + ROTATE_HANDLE_GAP, 0.003, display),
+      scale: this.surfacePoint(surface, sx * W / 2, -H / 2, 0.003, display),
+      center: this.surfacePoint(surface, 0, 0, 0.003, display),
     };
   }
 
@@ -195,6 +209,19 @@ export function nearestTriangle(surface: SurfaceMesh, p: [number, number, number
 /** Point on triangle `tri` of `surface` at barycentric coordinates `b`. */
 export function pointFromBary(surface: SurfaceMesh, tri: number, b: [number, number, number]): [number, number, number] {
   const I = surface.indices, P = surface.positions;
+  const a = I[tri * 3] * 3, c1 = I[tri * 3 + 1] * 3, c2 = I[tri * 3 + 2] * 3;
+  return [
+    b[0] * P[a] + b[1] * P[c1] + b[2] * P[c2],
+    b[0] * P[a + 1] + b[1] * P[c1 + 1] + b[2] * P[c2 + 1],
+    b[0] * P[a + 2] + b[1] * P[c1 + 2] + b[2] * P[c2 + 2],
+  ];
+}
+
+/** Same spot of skin on the displayed (posed) body: barycentric transfer within the triangle. */
+export function toDisplay(surface: SurfaceMesh, display: Float32Array, tri: number, restPoint: [number, number, number]): [number, number, number] {
+  if (display === surface.positions) return restPoint;
+  const b = barycentric(surface, tri, restPoint);
+  const I = surface.indices, P = display;
   const a = I[tri * 3] * 3, c1 = I[tri * 3 + 1] * 3, c2 = I[tri * 3 + 2] * 3;
   return [
     b[0] * P[a] + b[1] * P[c1] + b[2] * P[c2],

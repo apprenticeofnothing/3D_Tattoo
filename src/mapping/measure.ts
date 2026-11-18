@@ -19,7 +19,7 @@ export interface DistanceResult {
 }
 
 /** Shortest distance along the skin from a to b, or null if b is beyond the mapped patch. */
-export function distanceOnSkin(surface: SurfaceMesh, a: SurfacePoint, b: SurfacePoint): DistanceResult | null {
+export function distanceOnSkin(surface: SurfaceMesh, a: SurfacePoint, b: SurfacePoint, display?: Float32Array): DistanceResult | null {
   const straight = Math.hypot(b.point[0] - a.point[0], b.point[1] - a.point[1], b.point[2] - a.point[2]);
   const normal = normalAt(surface, a.tri, barycentric(surface, a.tri, a.point));
   const tangent = tangentFrom(normal, [0, 1, 0]);
@@ -37,11 +37,15 @@ export function distanceOnSkin(surface: SurfaceMesh, a: SurfacePoint, b: Surface
   const loc = new PatchLocator(surface, patch);
   const n = Math.max(2, Math.ceil(geodesic / 0.004));
   const path: Array<[number, number, number]> = [];
+  const D = display ?? surface.positions;
   for (let i = 0; i <= n; i++) {
-    const p = loc.locate((u * i) / n, (v * i) / n);
-    if (p) path.push(p);
+    const h = loc.locateTri((u * i) / n, (v * i) / n);
+    if (!h) continue;
+    const t = h.tri * 3, w = h.bary;
+    const ia = surface.indices[t] * 3, ib = surface.indices[t + 1] * 3, ic = surface.indices[t + 2] * 3;
+    path.push([w[0] * D[ia] + w[1] * D[ib] + w[2] * D[ic], w[0] * D[ia + 1] + w[1] * D[ib + 1] + w[2] * D[ic + 1], w[0] * D[ia + 2] + w[1] * D[ib + 2] + w[2] * D[ic + 2]]);
   }
-  if (path.length) { path[0] = a.point; path[path.length - 1] = b.point; }
+  if (path.length && !display) { path[0] = a.point; path[path.length - 1] = b.point; }
   return { geodesic, straight, path };
 }
 
@@ -60,7 +64,7 @@ export interface CircumferenceResult {
  * skin around the point (principal direction of a tube is its axis). For
  * flat areas such as the torso the vertical axis is used.
  */
-export function circumferenceAt(surface: SurfaceMesh, p: SurfacePoint): CircumferenceResult | null {
+export function circumferenceAt(surface: SurfaceMesh, p: SurfacePoint, display?: Float32Array): CircumferenceResult | null {
   const normal = normalAt(surface, p.tri, barycentric(surface, p.tri, p.point));
   const tangent = tangentFrom(normal, [0, 1, 0]);
   const patch = computeExpMap(surface, { tri: p.tri, point: p.point, normal, tangent }, { radius: 0.12, exact: false, smoothPasses: 0 });
@@ -86,7 +90,7 @@ export function circumferenceAt(surface: SurfaceMesh, p: SurfacePoint): Circumfe
   const fromShape = lambda1 > 0.6 * trace;
   let axis: [number, number, number] = fromShape ? [ax, ay, az] : [0, 1, 0];
   if (axis[1] < 0) axis = [-axis[0], -axis[1], -axis[2]];
-  const sec = sectionLoop(surface, p.tri, p.point, axis);
+  const sec = sectionLoop(surface, p.tri, p.point, axis, 200000, display);
   if (!sec.closed) return null;
   return { length: sec.length, points: sec.points, axis, fromShape };
 }

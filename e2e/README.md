@@ -15,6 +15,8 @@ npx vite-node e2e/make-test-obj.ts /tmp/obj  # synthetic Z-up OBJ
 node e2e/scan-orientation.mjs /tmp/shots /tmp/obj
 node e2e/capture.mjs /tmp/shots              # capture page with a fake camera
 node e2e/body-builder.mjs /tmp/shots         # presets, sliders, designs across body changes
+node e2e/arm-pose.mjs /tmp/shots             # arm poses, designs riding on the skin, tap/drag/measure when posed
+node e2e/joint-drag.mjs /tmp/shots           # grab wrist/elbow rings and move the arm (mouse and touch)
 ```
 
 Each script prints what it measured (for example "drag: anchor screen y

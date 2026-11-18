@@ -32,7 +32,7 @@ function edgeMap(mesh: SurfaceMesh): Map<number, [number, number]> {
   return m;
 }
 
-export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [number, number, number], axis: [number, number, number], maxSteps = 200000): Section {
+export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [number, number, number], axis: [number, number, number], maxSteps = 200000, display?: Float32Array): Section {
   let startTri = startTriIn;
   const P = mesh.positions, I = mesh.indices;
   const edges = edgeMap(mesh);
@@ -45,6 +45,12 @@ export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [numbe
     const da = sd(a), db = sd(b);
     const t = da / (da - db);
     return [P[a * 3] + (P[b * 3] - P[a * 3]) * t, P[a * 3 + 1] + (P[b * 3 + 1] - P[a * 3 + 1]) * t, P[a * 3 + 2] + (P[b * 3 + 2] - P[a * 3 + 2]) * t];
+  };
+  const shown: number[] = [];
+  const crossShown = (a: number, b: number) => {
+    if (!display) return;
+    const da = sd(a), db = sd(b), t = da / (da - db), D = display;
+    shown.push(D[a * 3] + (D[b * 3] - D[a * 3]) * t, D[a * 3 + 1] + (D[b * 3 + 1] - D[a * 3 + 1]) * t, D[a * 3 + 2] + (D[b * 3 + 2] - D[a * 3 + 2]) * t);
   };
   /** Edges (as [va, vb]) of triangle t crossed by the plane. */
   const crossedEdges = (t: number): [number, number][] => {
@@ -82,6 +88,7 @@ export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [numbe
   let edge = start[0];
   let prev = crossPoint(edge[0], edge[1]);
   pts.push(...prev);
+  crossShown(edge[0], edge[1]);
   let closed = false;
   for (let step = 0; step < maxSteps; step++) {
     const key = edge[0] < edge[1] ? edge[0] * 4294967296 + edge[1] : edge[1] * 4294967296 + edge[0];
@@ -94,6 +101,7 @@ export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [numbe
     const p = crossPoint(edge[0], edge[1]);
     length += Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]);
     pts.push(...p); prev = p;
+    crossShown(edge[0], edge[1]);
     if (tri === startTri) { closed = true; break; }
   }
   if (closed) {
@@ -102,5 +110,5 @@ export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [numbe
     length += 0; // already includes the segment back onto the start triangle
     void p0;
   }
-  return { length, closed, points: new Float32Array(pts) };
+  return { length, closed, points: new Float32Array(display ? shown : pts) };
 }

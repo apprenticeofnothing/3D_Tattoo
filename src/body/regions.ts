@@ -64,6 +64,9 @@ export interface RegionPose {
 
 export interface PartLabels { labels: Uint8Array; names: string[] }
 
+/** The body as displayed (e.g. with posed arms): same vertex ids as `positions`. */
+export interface Shown { positions: Float32Array; normals: Float32Array }
+
 /** Labelled parts used for each region (bodies with a skeleton). Fractions run from the joint nearer the trunk. */
 const LABELLED: Record<string, { parts: string[]; from?: number; to?: number; also?: { parts: string[]; from?: number; to?: number } }> = {
   'head-front': { parts: ['head'] }, 'head-back': { parts: ['head'] },
@@ -127,7 +130,7 @@ function limbAxis(positions: Float32Array, sel: number[]): { c: [number, number,
   return { c: [cx, cy, cz], d: [ax, ay, az] };
 }
 
-function poseFrom(positions: Float32Array, sel: number[], dir: Vector3, def: RegionDef, height: number): RegionPose | null {
+function poseFrom(positions: Float32Array, sel: number[], dir: Vector3, def: RegionDef, height: number, shown?: Shown): RegionPose | null {
   if (sel.length === 0) return null;
   const c = new Vector3();
   for (const i of sel) c.add(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
@@ -138,13 +141,25 @@ function poseFrom(positions: Float32Array, sel: number[], dir: Vector3, def: Reg
   const scored = use.map((i) => ({ i, s: positions[i * 3] * dir.x + positions[i * 3 + 1] * dir.y + positions[i * 3 + 2] * dir.z })).sort((a, b) => b.s - a.s);
   const top = scored.slice(0, Math.max(5, Math.ceil(scored.length * 0.5)));
   const target = new Vector3();
-  for (const { i } of top) target.add(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
+  const P = shown ? shown.positions : positions;
+  for (const { i } of top) target.add(new Vector3(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]));
   target.multiplyScalar(1 / top.length);
+  let view = dir;
+  if (shown) {
+    // The area was chosen on the relaxed body; look at it along its posed skin normal.
+    const n = new Vector3();
+    for (const { i } of top) n.add(new Vector3(shown.normals[i * 3], shown.normals[i * 3 + 1], shown.normals[i * 3 + 2]));
+    if (n.lengthSq() > 1e-8) {
+      n.normalize();
+      if (n.y < -0.5) n.y = -0.5; // never from underneath the floor
+      view = n.normalize();
+    }
+  }
   const dist = def.part === 'torso' ? 1.3 : def.part === 'head' ? 0.9 : def.part === 'arm' ? 0.95 : 1.1;
-  return { target, position: target.clone().addScaledVector(dir, dist * (height / 1.8)) };
+  return { target, position: target.clone().addScaledVector(view, dist * (height / 1.8)) };
 }
 
-function locateLabelled(def: RegionDef, positions: Float32Array, height: number, lab: PartLabels): RegionPose | null {
+function locateLabelled(def: RegionDef, positions: Float32Array, height: number, lab: PartLabels, shown?: Shown): RegionPose | null {
   const spec = LABELLED[baseId(def)];
   let dir = viewDirection(def);
   if (!spec) {
@@ -158,7 +173,7 @@ function locateLabelled(def: RegionDef, positions: Float32Array, height: number,
       if (def.side === 'right' && x >= 0) return false;
       return true;
     });
-    return poseFrom(positions, sel, dir, def, height);
+    return poseFrom(positions, sel, dir, def, height, shown);
   }
   let sel = labelledVertices(positions, lab, spec.parts, def.side, spec.from, spec.to);
   if (spec.also) sel = sel.concat(labelledVertices(positions, lab, spec.also.parts, def.side, spec.also.from, spec.also.to));
@@ -170,7 +185,7 @@ function locateLabelled(def: RegionDef, positions: Float32Array, height: number,
     const perp = dir.clone().addScaledVector(a, -dir.dot(a));
     if (perp.lengthSq() > 1e-6) dir = perp.normalize();
   }
-  return poseFrom(positions, sel, dir, def, height);
+  return poseFrom(positions, sel, dir, def, height, shown);
 }
 
 /**
@@ -179,8 +194,8 @@ function locateLabelled(def: RegionDef, positions: Float32Array, height: number,
  * them (body builder), otherwise a height-band heuristic. Returns null
  * when no vertices match.
  */
-export function locateRegion(def: RegionDef, positions: Float32Array, height: number, labels?: PartLabels): RegionPose | null {
-  if (labels) return locateLabelled(def, positions, height, labels);
+export function locateRegion(def: RegionDef, positions: Float32Array, height: number, labels?: PartLabels, shown?: Shown): RegionPose | null {
+  if (labels) return locateLabelled(def, positions, height, labels, shown);
   const yMin = def.yMin * height, yMax = def.yMax * height;
   // Pass 1: band extents.
   let maxAbsX = 0, count = 0;

@@ -9,6 +9,9 @@
 import { BufferAttribute, BufferGeometry, Color, Mesh, MeshStandardMaterial } from 'three';
 import { applyStencil, buildCatmullClark, quadsToTriangles, type Stencil } from '../mesh/subdivide';
 import { computeNormals } from '../mesh/marchingCubes';
+import { surfaceFromIndexed, type SurfaceMesh } from '../mesh/topology';
+import { Vector3 } from 'three';
+import { boneTransforms, isRestPose, jointPositions, posedJoints, restArm, skinDQS, solveArmIK, type ArmPose, type Joints, type Pose, type RestArm, type Side } from './pose';
 
 export const BUILDER_TOPOLOGY = 'makehuman-hm08-body+eyes/cc1';
 const DENSITY = 1010; // kg/m^3
@@ -17,11 +20,15 @@ export interface BodyMeta {
   version: number;
   topology: string;
   vertexCount: number;
+  /** Rendered vertices plus hidden joint helper vertices (appended). */
+  totalVertexCount: number;
   quadCount: number;
   parts: string[];
   materials: string[];
   deltaUnitM: number;
-  buffers: { base: number; quads: number; labels: number; material: number; bodyQuad: number };
+  buffers: { base: number; quads: number; labels: number; material: number; bodyQuad: number; skinBones: number; skinWeights: number };
+  poseBones: string[];
+  joints: Record<string, number[]>;
   targets: Record<string, { count: number; index: number; delta: number }>;
   detailTargets: Record<string, string[]>;
   presets: PresetMeta[];
@@ -47,6 +54,8 @@ export interface BodyData {
   labels: Uint8Array;
   material: Uint8Array;
   bodyQuad: Uint8Array;
+  skinBones: Uint8Array;
+  skinWeights: Uint8Array;
   targets: Map<string, { index: Uint16Array; delta: Int16Array }>;
 }
 
@@ -126,11 +135,13 @@ export function parseBodyData(meta: BodyMeta, raw: ArrayBuffer): BodyData {
   }
   return {
     meta,
-    base: new Float32Array(raw, b.base, n * 3),
+    base: new Float32Array(raw, b.base, meta.totalVertexCount * 3),
     quads: new Uint16Array(raw, b.quads, q * 4),
     labels: new Uint8Array(raw, b.labels, n),
     material: new Uint8Array(raw, b.material, n),
     bodyQuad: new Uint8Array(raw, b.bodyQuad, q),
+    skinBones: new Uint8Array(raw, b.skinBones, n * 4),
+    skinWeights: new Uint8Array(raw, b.skinWeights, n * 4),
     targets,
   };
 }
@@ -272,12 +283,22 @@ export class BuilderBody {
   readonly stencil: Stencil;
   readonly geometry = new BufferGeometry();
   readonly fineLabels: Uint8Array;
+  /** Rest-pose coarse positions (native MakeHuman scale, feet at 0). */
   coarse: Float32Array;
   params: BodyParams;
   appearance: Appearance = { skinTone: SKIN_TONES[2] };
   heightM = 1.93;
+  pose: Pose = {};
+  /** Share of linear blending mixed into dual-quaternion skinning where the arm meets the trunk. */
+  skinMix = 1;
+  /** Rest-pose (A-pose) fine positions in world metres: the reference for tattoo mapping. */
+  readonly restFine: Float32Array;
+  /** Displayed (posed) fine positions; the geometry's position attribute. */
   private fine: Float32Array;
-  private tris: Uint32Array;
+  private posedCoarse: Float32Array;
+  private norm = { cx: 0, cz: 0, minY: 0, s: 1 };
+  private joints: Joints = {};
+  readonly tris: Uint32Array;
   private coarseColors: Float32Array;
   private fineColors: Float32Array;
 
@@ -287,7 +308,9 @@ export class BuilderBody {
     this.fineLabels = new Uint8Array(this.stencil.fineCount);
     for (let i = 0; i < this.stencil.fineCount; i++) this.fineLabels[i] = data.labels[this.stencil.dominant[i]];
     this.coarse = new Float32Array(data.base.length);
+    this.posedCoarse = new Float32Array(data.base.length);
     this.fine = new Float32Array(this.stencil.fineCount * 3);
+    this.restFine = new Float32Array(this.stencil.fineCount * 3);
     this.coarseColors = new Float32Array(data.meta.vertexCount * 3);
     this.fineColors = new Float32Array(this.stencil.fineCount * 3);
     this.geometry.setAttribute('position', new BufferAttribute(this.fine, 3));
@@ -311,8 +334,84 @@ export class BuilderBody {
     this.params = params;
     this.heightM = heightM;
     blendCoarse(this.data, params, this.coarse);
-    applyStencil(this.stencil, this.coarse, 3, this.fine);
-    normalise(this.fine, heightM);
+    this.joints = jointPositions(this.coarse, this.data.meta.joints);
+    applyStencil(this.stencil, this.coarse, 3, this.restFine);
+    // Height normalisation is measured on the rest pose and reused for the
+    // posed body, so raising an arm does not rescale the body.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    const r = this.restFine;
+    for (let i = 0; i < r.length; i += 3) {
+      if (r[i] < minX) minX = r[i]; if (r[i] > maxX) maxX = r[i];
+      if (r[i + 1] < minY) minY = r[i + 1]; if (r[i + 1] > maxY) maxY = r[i + 1];
+      if (r[i + 2] < minZ) minZ = r[i + 2]; if (r[i + 2] > maxZ) maxZ = r[i + 2];
+    }
+    this.norm = { cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2, minY, s: heightM / (maxY - minY) };
+    this.normaliseInPlace(this.restFine);
+    this.applyPose();
+  }
+
+  /** Pose the arms. Cheap: skinning plus subdivision, no change to the rest shape. */
+  setPose(pose: Pose): void {
+    this.pose = pose;
+    this.applyPose();
+  }
+
+  /** The modelled arm angles of this body (what "Relaxed" means). */
+  restArm(side: Side): RestArm { return restArm(this.joints, side); }
+
+  /** Joint positions in world metres (rest pose). */
+  worldJoints(): Joints {
+    const out: Joints = {};
+    const { cx, cz, minY, s } = this.norm;
+    for (const [k, p] of Object.entries(this.joints)) out[k] = [(p[0] - cx) * s, (p[1] - minY) * s, (p[2] - cz) * s];
+    return out;
+  }
+
+  /** Posed positions of the draggable joints in world metres. */
+  posedWorldJoint(side: Side, joint: 'wrist' | 'elbow' | 'shoulder'): Vector3 {
+    const S = side === 'left' ? 'L' : 'R';
+    const name = joint === 'wrist' ? `wrist.${S}____head` : joint === 'elbow' ? `lowerarm01.${S}____head` : `upperarm01.${S}____head`;
+    const pj = posedJoints(this.joints, this.pose, this.data.meta.poseBones)[name];
+    const { cx, cz, minY, s } = this.norm;
+    return new Vector3((pj[0] - cx) * s, (pj[1] - minY) * s, (pj[2] - cz) * s);
+  }
+
+  /** Arm pose that brings the dragged joint as close as it can to a world-space target. */
+  solveIK(side: Side, joint: 'wrist' | 'elbow', worldTarget: Vector3): ArmPose {
+    const { cx, cz, minY, s } = this.norm;
+    const t = new Vector3(worldTarget.x / s + cx, worldTarget.y / s + minY, worldTarget.z / s + cz);
+    return solveArmIK(this.joints, this.pose, side, joint, t);
+  }
+
+  /** Displayed (posed) positions of the fine vertices; same ids as the rest surface. */
+  displayPositions(): Float32Array { return this.fine; }
+  /** Displayed (posed) vertex normals. */
+  displayNormals(): Float32Array { return this.geometry.getAttribute('normal').array as Float32Array; }
+
+  /** Mapping surface in the rest pose. Triangle ids equal the mesh's face indices. */
+  restSurface(): SurfaceMesh {
+    const surface = surfaceFromIndexed({ positions: this.restFine, indices: this.tris });
+    surface.sources = [{ mesh: this.mesh, triStart: 0, triCount: this.tris.length / 3 }];
+    surface.labels = this.fineLabels;
+    surface.partNames = this.data.meta.parts;
+    surface.topology = BUILDER_TOPOLOGY;
+    return surface;
+  }
+
+  private normaliseInPlace(a: Float32Array): void {
+    const { cx, cz, minY, s } = this.norm;
+    for (let i = 0; i < a.length; i += 3) { a[i] = (a[i] - cx) * s; a[i + 1] = (a[i + 1] - minY) * s; a[i + 2] = (a[i + 2] - cz) * s; }
+  }
+
+  private applyPose(): void {
+    if (isRestPose(this.pose)) {
+      this.fine.set(this.restFine);
+    } else {
+      const T = boneTransforms(this.joints, this.pose, this.data.meta.poseBones);
+      skinDQS(this.coarse, this.posedCoarse, this.data.meta.vertexCount, this.data.skinBones, this.data.skinWeights, T, this.skinMix);
+      applyStencil(this.stencil, this.posedCoarse, 3, this.fine);
+      this.normaliseInPlace(this.fine);
+    }
     const n = computeNormals({ positions: this.fine, indices: this.tris });
     (this.geometry.getAttribute('normal') as BufferAttribute).set(n);
     this.geometry.getAttribute('position').needsUpdate = true;

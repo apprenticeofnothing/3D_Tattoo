@@ -91,8 +91,12 @@ export class DecalObject {
   }
 
   /** Rebuild the geometry for a patch. */
-  build(surface: SurfaceMesh, patch: Patch, params: DecalParams, stretch: VertexStretch | null): void {
-    const { positions: P, indices: I } = surface;
+  /** Surface vertex id of every decal corner, for re-posing. */
+  private cornerIds = new Uint32Array(0);
+
+  build(surface: SurfaceMesh, patch: Patch, params: DecalParams, stretch: VertexStretch | null, display?: Float32Array): void {
+    const { indices: I } = surface;
+    const P = display ?? surface.positions;
     const { width: W, height: H, mirror, wrap, circumference: C } = params;
     this.material.uniforms.wrap.value = wrap;
     const triLists = wrap ? [patch.tris, patch.seamTris] : [patch.tris];
@@ -126,12 +130,14 @@ export class DecalObject {
     }
     const n = keep.length * 3;
     const pos = new Float32Array(n * 3);
+    this.cornerIds = new Uint32Array(n);
     const heat = new Float32Array(n * 3);
     const col = new Color();
     for (let i = 0; i < keep.length; i++) {
       const t = keep[i];
       for (let k = 0; k < 3; k++) {
         const g = I[t * 3 + k];
+        this.cornerIds[i * 3 + k] = g;
         const o = (i * 3 + k) * 3;
         pos[o] = P[g * 3]; pos[o + 1] = P[g * 3 + 1]; pos[o + 2] = P[g * 3 + 2];
         const li = patch.local[g];
@@ -147,6 +153,19 @@ export class DecalObject {
     this.geometry.dispose();
     this.geometry = g;
     this.mesh.geometry = g;
+  }
+
+  /** Move the decal with the skin: copy the displayed positions of its vertices. */
+  setPositions(display: Float32Array): void {
+    const attr = this.geometry.getAttribute('position');
+    if (!attr) return;
+    const a = attr.array as Float32Array;
+    const ids = this.cornerIds;
+    for (let i = 0; i < ids.length; i++) {
+      const g = ids[i] * 3;
+      a[i * 3] = display[g]; a[i * 3 + 1] = display[g + 1]; a[i * 3 + 2] = display[g + 2];
+    }
+    attr.needsUpdate = true;
   }
 
   dispose() { this.geometry.dispose(); this.material.dispose(); }

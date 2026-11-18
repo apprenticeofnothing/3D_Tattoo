@@ -1,5 +1,5 @@
 import './style.css';
-import { Euler, Mesh, Object3D, Quaternion, Raycaster, Vector2, Vector3 } from 'three';
+import { Euler, Mesh, Object3D, Plane, Quaternion, Raycaster, Vector2, Vector3 } from 'three';
 import { fitToHeight } from './body/fit';
 import { makePlaceholderBody } from './body/placeholder';
 import { locateRegion, REGIONS, type RegionDef } from './body/regions';
@@ -11,13 +11,16 @@ import { attachGestures, type DragKind } from './ui/gestures';
 import { Viewer, type CompareSide } from './viewer/Viewer';
 import { SelectionGizmo } from './viewer/SelectionGizmo';
 import { MeasureOverlay } from './viewer/MeasureOverlay';
+import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
 import { History, newId, type PlacementData, type ProjectData } from './app/project';
-import { PlacedDesign, nearestTriangle, pointFromBary, type Placement } from './mapping/placements';
+import { PlacedDesign, nearestTriangle, pointFromBary, toDisplay, type Placement } from './mapping/placements';
 import { BuilderBody, defaultParams, loadBodyData, presetParamsAtHeight, SKIN_TONES, type Appearance, type BodyData, type BodyParams, type PresetMeta } from './body/builder';
 import { BodyPanel } from './ui/bodyPanel';
+import { PosePanel } from './ui/posePanel';
+import { isRestPose, type Pose } from './body/pose';
 
 const HEIGHT_KEY = 'tattoo.heightCm';
 const PROJECT_KEY = 'tattoo.project.v1';
@@ -35,6 +38,8 @@ const gizmo = new SelectionGizmo();
 viewer.scene.add(gizmo.group);
 const measureOverlay = new MeasureOverlay();
 viewer.scene.add(measureOverlay.group);
+const jointHandles = new JointHandles();
+viewer.scene.add(jointHandles.group);
 const designs = new DesignStore();
 const history = new History();
 let surface: SurfaceMesh | null = null;
@@ -60,7 +65,7 @@ let lighting: 'studio' | 'flat' | 'auto' = (localStorage.getItem('tattoo.lightin
 // Body builder (MakeHuman-derived bodies shaped with sliders).
 type BodySource = 'builder' | 'scan' | 'mannequin';
 const BUILDER_KEY = 'tattoo.builder.v1';
-interface BuilderState { params: BodyParams; appearance: Appearance; presetId: string | null; base?: BodyParams | null }
+interface BuilderState { params: BodyParams; appearance: Appearance; presetId: string | null; base?: BodyParams | null; pose?: Pose }
 let bodySource: BodySource = 'builder';
 let bodyData: BodyData | null = null;
 let builder: BuilderBody | null = null;
@@ -71,9 +76,21 @@ try {
   if (raw) { builderState = JSON.parse(raw) as BuilderState; builderStored = true; }
 } catch { builderState = null; }
 let bodyPanel: BodyPanel | null = null;
+let posePanel: PosePanel | null = null;
 
 function setStatus(text: string) { status.textContent = text; }
 function bodyStatus() { setStatus(`${bodyLabel} · ${heightCm} cm${bodyInfo}`); }
+
+/**
+ * Positions of the body as shown. Mapping, stretch and measurements use the
+ * rest pose (surface.positions); what the eye sees, and where taps land, is
+ * the posed body. Both share vertex ids.
+ */
+function display(): Float32Array {
+  if (surface && bodySource === 'builder' && builder && surface.topology && viewer.getBody() === builder.mesh) return builder.displayPositions();
+  return surface ? surface.positions : new Float32Array(0);
+}
+const shown = (tri: number, p: [number, number, number]) => (surface ? toDisplay(surface, display(), tri, p) : p);
 
 // ---------- Body ----------
 
@@ -92,7 +109,7 @@ function afterBodyChange(opts: { frame?: boolean } = {}) {
   const body = viewer.getBody()!;
   const prev = surface;
   const carry = !restorePending && placed.length ? projectData() : null;
-  surface = surfaceFromObject(body);
+  surface = bodySource === 'builder' && builder && body === builder.mesh ? builder.restSurface() : surfaceFromObject(body);
   bodyTriangles = surface.indices.length / 3;
   if (opts.frame !== false) viewer.frameBody(heightM());
   if (restorePending) { clearPlacements(); const data = restorePending; restorePending = null; void applyProject(data); return; }
@@ -135,6 +152,7 @@ function showBuilder(opts: { frame?: boolean } = {}) {
   if (!bodyData || !builderState) { showPlaceholder(); return; }
   if (!builder) builder = new BuilderBody(bodyData, builderState.params);
   builder.appearance = builderState.appearance;
+  builder.pose = builderState.pose ?? {};
   builder.update(builderState.params, heightM());
   builder.mesh.updateMatrixWorld(true);
   scanObject = null;
@@ -146,6 +164,7 @@ function showBuilder(opts: { frame?: boolean } = {}) {
   afterBodyChange(opts);
   bodyStatus();
   refreshBodyPanel();
+  refreshPosePanel();
 }
 
 let settleTimer = 0;
@@ -193,6 +212,7 @@ function setAppearance(a: Appearance) {
 
 function openBodyPanel() {
   if (!builderState) { setStatus('The body builder is not available (its data did not load).'); return; }
+  closePosePanel();
   if (!bodyPanel) {
     bodyPanel = new BodyPanel(stage, bodyData, { source: bodySource, params: builderState.params, appearance: builderState.appearance, presetId: builderState.presetId, base: builderState.base ?? null, heightCm, bmi: builder ? builder.bmi() : null }, {
       onParams: setBuilderParams,
@@ -215,9 +235,10 @@ function openBodyPanel() {
 let insetBottom = 0;
 function updateViewInsets() {
   const before = insetBottom;
-  if (!bodyPanel?.open) { viewer.setInsets({}); insetBottom = 0; }
+  const panel = bodyPanel?.open ? bodyPanel.el : posePanel?.open ? posePanel.el : null;
+  if (!panel) { viewer.setInsets({}); insetBottom = 0; }
   else {
-    const r = bodyPanel.el.getBoundingClientRect(), s = stage.getBoundingClientRect();
+    const r = panel.getBoundingClientRect(), s = stage.getBoundingClientRect();
     if (r.width < s.width * 0.9) { viewer.setInsets({ right: r.width }); insetBottom = 0; }
     else { viewer.setInsets({ bottom: r.height }); insetBottom = r.height; }
   }
@@ -226,9 +247,75 @@ function updateViewInsets() {
 }
 window.addEventListener('resize', updateViewInsets);
 
+// ---------- Arm pose ----------
+
+function poseAvailable(): boolean { return bodySource === 'builder' && !!builder; }
+
+/** Show joint handles while the pose panel is open on a built body. */
+function updateJointHandles() {
+  const on = !!posePanel?.open && poseAvailable() && !compare;
+  jointHandles.setVisible(on);
+  if (!on || !builder) return;
+  const j = (side: ArmSide) => ({ shoulder: builder!.posedWorldJoint(side, 'shoulder'), elbow: builder!.posedWorldJoint(side, 'elbow'), wrist: builder!.posedWorldJoint(side, 'wrist') });
+  jointHandles.update({ left: j('left'), right: j('right') });
+  viewer.requestRender();
+}
+
+function refreshPosePanel() {
+  updateJointHandles();
+  if (!posePanel) return;
+  const rest = builder
+    ? { left: builder.restArm('left'), right: builder.restArm('right') }
+    : { left: { raise: 45, forward: 0, bend: 45 }, right: { raise: 45, forward: 0, bend: 45 } };
+  posePanel.update({ available: poseAvailable(), pose: builderState?.pose ?? {}, rest });
+}
+
+let poseSaveTimer = 0;
+/** Pose the arms. Designs ride along with the skin; nothing is recomputed. */
+function setPose(pose: Pose, live: boolean, preset?: string) {
+  if (!builderState || !builder || !poseAvailable()) return;
+  builderState.pose = isRestPose(pose) ? {} : pose;
+  builder.setPose(builderState.pose);
+  const D = display();
+  for (const d of placed) d.decal.setPositions(D);
+  updateGizmo();
+  if (measuring) { measureOverlay.clear(); measureFirst = null; }
+  viewer.requestRender();
+  refreshPosePanel();
+  window.clearTimeout(poseSaveTimer);
+  poseSaveTimer = window.setTimeout(() => { saveBuilderState(); autosave(); }, live ? 400 : 0);
+  if (preset === 'inner') {
+    const def = REGIONS.find((r) => r.id === 'forearm-inner-left');
+    if (def) setTimeout(() => goTo(def), 50);
+  } else if (preset && !live) viewer.frameBody(heightM());
+}
+
+function openPosePanel() {
+  closeBodyPanel();
+  if (!posePanel) {
+    posePanel = new PosePanel(stage, { available: poseAvailable(), pose: builderState?.pose ?? {}, rest: { left: { raise: 45, forward: 0, bend: 45 }, right: { raise: 45, forward: 0, bend: 45 } } }, {
+      onPose: setPose,
+      onClose: closePosePanel,
+    });
+  }
+  posePanel.show();
+  refreshPosePanel();
+  stage.classList.add('body-open');
+  $('btn-pose').classList.add('active');
+  updateViewInsets();
+}
+
+function closePosePanel() {
+  posePanel?.hide();
+  updateJointHandles();
+  if (!bodyPanel?.open) stage.classList.remove('body-open');
+  $('btn-pose').classList.remove('active');
+  updateViewInsets();
+}
+
 function closeBodyPanel() {
   bodyPanel?.hide();
-  stage.classList.remove('body-open');
+  if (!posePanel?.open) stage.classList.remove('body-open');
   $('btn-shape').classList.remove('active');
   updateViewInsets();
 }
@@ -297,6 +384,7 @@ function applyScan() {
   viewer.setBody(group);
   bodySource = 'scan';
   refreshBodyPanel();
+  refreshPosePanel();
   applyLighting();
   const notes = [scanInfo.textured ? 'textured' : '', info.rotatedToYUp ? 'rotated to upright' : '', orientManual ? `up ${orient.up}, turned ${orient.turn * 90}°` : ''].filter(Boolean);
   bodyInfo = ` · ${(scanInfo.triangles / 1000).toFixed(0)}k triangles${notes.length ? ' · ' + notes.join(' · ') : ''}`;
@@ -340,7 +428,9 @@ function setHeight(cm: number) {
 function goTo(def: RegionDef) {
   if (!surface) return;
   const labels = surface.labels && surface.partNames ? { labels: surface.labels, names: surface.partNames } : undefined;
-  const pose = locateRegion(def, surface.positions, heightM(), labels);
+  const posed = bodySource === 'builder' && builder && !isRestPose(builder.pose);
+  const shownBody = posed && builder ? { positions: builder.displayPositions(), normals: builder.displayNormals() } : undefined;
+  const pose = locateRegion(def, surface.positions, heightM(), labels, shownBody);
   if (!pose) { setStatus(`Could not find ${def.label} on this body`); return; }
   viewer.flyTo(pose);
   setStatus(def.label);
@@ -353,14 +443,29 @@ function ndcAt(clientX: number, clientY: number): Vector2 {
   const rect = viewer.renderer.domElement.getBoundingClientRect();
   return new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
 }
-function pickSurface(clientX: number, clientY: number): { tri: number; point: [number, number, number] } | null {
+function pickSurface(clientX: number, clientY: number): { tri: number; point: [number, number, number]; shown: [number, number, number] } | null {
   if (!surface) return null;
   raycaster.setFromCamera(ndcAt(clientX, clientY), viewer.camera);
   const hits = raycaster.intersectObjects(viewer.bodyMeshes(), false);
   const hit = hits.find((h) => h.faceIndex !== undefined && h.faceIndex !== null);
   if (!hit) return null;
   try {
-    return { tri: triangleForHit(surface, hit.object as Mesh, hit.faceIndex!), point: [hit.point.x, hit.point.y, hit.point.z] };
+    const tri = triangleForHit(surface, hit.object as Mesh, hit.faceIndex!);
+    const seen: [number, number, number] = [hit.point.x, hit.point.y, hit.point.z];
+    const D = display();
+    if (D === surface.positions) return { tri, point: seen, shown: seen };
+    // Same barycentric spot of the triangle in the rest pose.
+    const I = surface.indices, P = surface.positions;
+    const a = I[tri * 3] * 3, b = I[tri * 3 + 1] * 3, c = I[tri * 3 + 2] * 3;
+    const ux = D[b] - D[a], uy = D[b + 1] - D[a + 1], uz = D[b + 2] - D[a + 2];
+    const vx = D[c] - D[a], vy = D[c + 1] - D[a + 1], vz = D[c + 2] - D[a + 2];
+    const wx = seen[0] - D[a], wy = seen[1] - D[a + 1], wz = seen[2] - D[a + 2];
+    const uu = ux * ux + uy * uy + uz * uz, uv = ux * vx + uy * vy + uz * vz, vv = vx * vx + vy * vy + vz * vz;
+    const wu = wx * ux + wy * uy + wz * uz, wv = wx * vx + wy * vy + wz * vz;
+    const den = uu * vv - uv * uv || 1e-30;
+    const bv = (vv * wu - uv * wv) / den, bw = (uu * wv - uv * wu) / den, bu = 1 - bv - bw;
+    const point: [number, number, number] = [bu * P[a] + bv * P[b] + bw * P[c], bu * P[a + 1] + bv * P[b + 1] + bw * P[c + 1], bu * P[a + 2] + bv * P[b + 2] + bw * P[c + 2]];
+    return { tri, point, shown: seen };
   } catch { return null; }
 }
 function pickDesign(clientX: number, clientY: number): PlacedDesign | null {
@@ -438,7 +543,7 @@ function recompute(d: PlacedDesign, exact: boolean) {
     const state = busy.get(d)!;
     try {
       if (placed.includes(d)) {
-        d.update(surface!, state.exact);
+        d.update(surface!, state.exact, display());
         if (d === selected) { panel.renderReadout(d); updateGizmo(); }
         viewer.requestRender();
       }
@@ -463,7 +568,7 @@ function select(d: PlacedDesign | null) {
 
 function updateGizmo() {
   if (!selected || !surface || compare || !selected.result || selected.placement.hidden) { gizmo.set(null, null); return; }
-  gizmo.set(selected.outline(surface), selected.handles(surface));
+  gizmo.set(selected.outline(surface, 0.004, display()), selected.handles(surface, display()));
 }
 
 /** Apply a field change to the selected design. */
@@ -653,6 +758,7 @@ function setCompare(on: boolean) {
   } : null;
   if (!on) for (const d of placed) d.decal.mesh.visible = !d.placement.hidden;
   updateGizmo();
+  updateJointHandles();
   viewer.requestRender();
   if (on) setStatus('Compare: left shows A, right shows B. Set each design\'s "Compare as" in its panel.');
 }
@@ -675,23 +781,23 @@ function measureTap(hit: SurfacePoint) {
   if (!surface || !measuring) return;
   const fmt = (m: number) => `${(m * 100).toFixed(1)} cm`;
   if (measuring === 'around') {
-    const c = circumferenceAt(surface, hit);
+    const c = circumferenceAt(surface, hit, display());
     if (!c) { $('measure-text').textContent = 'No closed loop here. Try a point on a limb.'; measureOverlay.clear(); viewer.requestRender(); return; }
-    measureOverlay.set(c.points, [hit.point], true);
+    measureOverlay.set(c.points, [shown(hit.tri, hit.point)], true);
     $('measure-text').innerHTML = `Around: <b>${fmt(c.length)}</b>${c.fromShape ? '' : ' (horizontal cut)'}`;
     viewer.requestRender();
     return;
   }
   if (!measureFirst) {
     measureFirst = hit;
-    measureOverlay.set([hit.point], [hit.point]);
+    measureOverlay.set([shown(hit.tri, hit.point)], [shown(hit.tri, hit.point)]);
     $('measure-text').textContent = 'Now tap the second point';
     viewer.requestRender();
     return;
   }
-  const r = distanceOnSkin(surface, measureFirst, hit);
+  const r = distanceOnSkin(surface, measureFirst, hit, display());
   if (!r) { $('measure-text').textContent = 'Too far apart for one measurement. Tap a nearer second point.'; measureFirst = null; return; }
-  measureOverlay.set(r.path, [measureFirst.point, hit.point]);
+  measureOverlay.set(r.path, [shown(measureFirst.tri, measureFirst.point), shown(hit.tri, hit.point)]);
   $('measure-text').innerHTML = `Along the skin: <b>${fmt(r.geodesic)}</b> · straight line ${fmt(r.straight)}. Tap again to start over.`;
   measureFirst = null;
   viewer.requestRender();
@@ -703,9 +809,18 @@ $('measure-bar').querySelectorAll<HTMLButtonElement>('.seg-btn').forEach((b) => 
 
 // ---------- Gestures ----------
 
-type Drag = { kind: DragKind; offset: { dx: number; dy: number } };
+type Drag = { kind: DragKind; offset: { dx: number; dy: number }; joint?: { side: ArmSide; joint: JointId; plane: Plane } };
 let drag: Drag | null = null;
 const HANDLE_RADIUS = 30;
+let grabbedJoint: { side: ArmSide; joint: JointId } | null = null;
+
+/** New pose with one arm replaced; mirrored to the other arm when the panel edits both. */
+function poseWithArm(side: ArmSide, arm: import('./body/pose').ArmPose): Pose {
+  const cur = builderState?.pose ?? {};
+  const next: Pose = { left: cur.left, right: cur.right, [side]: arm };
+  if (posePanel?.side === 'both') next[side === 'left' ? 'right' : 'left'] = { ...arm };
+  return next;
+}
 
 function nearHandle(x: number, y: number, p: [number, number, number] | null): boolean {
   if (!p) return false;
@@ -715,9 +830,18 @@ function nearHandle(x: number, y: number, p: [number, number, number] | null): b
 
 attachGestures(viewer.renderer.domElement, viewer.controls, {
   hitTest(x, y) {
+    if (jointHandles.group.visible) {
+      let best: { side: ArmSide; joint: JointId; d: number } | null = null;
+      for (const h of jointHandles.positions()) {
+        const s = toScreen([h.p.x, h.p.y, h.p.z]);
+        const d = Math.hypot(s.x - x, s.y - y);
+        if (d < 30 && (!best || d < best.d)) best = { side: h.side, joint: h.joint, d };
+      }
+      if (best) { grabbedJoint = { side: best.side, joint: best.joint }; return 'joint'; }
+    }
     if (compare || !surface || measuring) return null;
     if (selected?.result) {
-      const h = selected.handles(surface);
+      const h = selected.handles(surface, display());
       if (nearHandle(x, y, h.rotate)) return 'rotate';
       if (nearHandle(x, y, h.scale)) return 'scale';
     }
@@ -739,15 +863,44 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     if (d) select(d); else if (selected) select(null);
   },
   onDragStart(kind, x, y) {
+    if (kind === 'joint' && grabbedJoint && builder) {
+      // Drag in the plane through the joint that faces the camera.
+      const p = builder.posedWorldJoint(grabbedJoint.side, grabbedJoint.joint);
+      const n = new Vector3(); viewer.camera.getWorldDirection(n);
+      drag = { kind, offset: { dx: 0, dy: 0 }, joint: { ...grabbedJoint, plane: new Plane().setFromNormalAndCoplanarPoint(n, p) } };
+      return;
+    }
     if (!selected || !surface) return;
     let offset = { dx: 0, dy: 0 };
     if (kind === 'move') {
-      const c = toScreen(selected.placement.point);
+      const c = toScreen(shown(selected.placement.tri, selected.placement.point));
       offset = { dx: c.x - x, dy: c.y - y };
     }
     drag = { kind, offset };
   },
   onDragMove(kind, x, y) {
+    if (kind === 'joint' && drag?.joint && builder && builderState) {
+      raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
+      const ray = raycaster.ray;
+      const t = new Vector3();
+      if (drag.joint.joint === 'elbow') {
+        // The elbow can only be on a sphere around the shoulder: put it where
+        // the pointer ray meets that sphere (the hit nearer the current elbow),
+        // or as close to the ray as it can get.
+        const sh = builder.posedWorldJoint(drag.joint.side, 'shoulder');
+        const el = builder.posedWorldJoint(drag.joint.side, 'elbow');
+        const r = el.distanceTo(sh);
+        const oc = ray.origin.clone().sub(sh);
+        const bq = oc.dot(ray.direction), cq = oc.lengthSq() - r * r, disc = bq * bq - cq;
+        if (disc >= 0) {
+          const t1 = -bq - Math.sqrt(disc), t2 = -bq + Math.sqrt(disc);
+          const p1 = ray.at(t1, new Vector3()), p2 = ray.at(t2, new Vector3());
+          t.copy(p1.distanceTo(el) <= p2.distanceTo(el) ? p1 : p2);
+        } else ray.closestPointToPoint(sh, t);
+      } else if (!ray.intersectPlane(drag.joint.plane, t)) return;
+      setPose(poseWithArm(drag.joint.side, builder.solveIK(drag.joint.side, drag.joint.joint, t)), true);
+      return;
+    }
     if (!selected || !surface || !drag) return;
     const p = selected.placement;
     if (kind === 'move') {
@@ -772,7 +925,12 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     panel.show(selected);
     recompute(selected, false);
   },
-  onDragEnd(_kind, cancelled) {
+  onDragEnd(kind, cancelled) {
+    if (kind === 'joint') {
+      drag = null; grabbedJoint = null;
+      if (!cancelled && builderState) setPose(builderState.pose ?? {}, false);
+      return;
+    }
     drag = null;
     if (!selected) return;
     recompute(selected, true);
@@ -811,6 +969,7 @@ $('btn-add').addEventListener('click', () => addSheet.open([
 ]));
 $('btn-parts').addEventListener('click', picker.open);
 $('btn-shape').addEventListener('click', () => (bodyPanel?.open ? closeBodyPanel() : openBodyPanel()));
+$('btn-pose').addEventListener('click', () => (posePanel?.open ? closePosePanel() : openPosePanel()));
 $('btn-undo').addEventListener('click', undo);
 $('btn-redo').addEventListener('click', redo);
 $('btn-compare').addEventListener('click', () => setCompare(!compare));
@@ -895,7 +1054,8 @@ try {
   set: (fn: (d: PlacedDesign) => void) => { if (selected) { fn(selected); panel.show(selected); recompute(selected, true); commit(); } },
   goTo: (id: string) => { const def = REGIONS.find((r) => r.id === id); if (def) goTo(def); },
   busy: anyBusy,
-  handles: () => (selected && surface ? selected.handles(surface) : null),
+  handles: () => (selected && surface ? selected.handles(surface, display()) : null),
+  shownPoint: (tri: number, p: [number, number, number]) => shown(tri, p),
   toScreen,
   history: () => ({ canUndo: history.canUndo, canRedo: history.canRedo }),
   undo, redo, setCompare,
@@ -903,6 +1063,10 @@ try {
   setMeasure, measureTap, pickSurface, measureText: () => $('measure-text').textContent,
   openBodyPanel, closeBodyPanel, choosePreset: (id: string) => { const p = presetById(id); if (p) choosePreset(p); },
   setBuilderParams, builderState: () => builderState, bodySource: () => bodySource,
+  setPose, openPosePanel, closePosePanel,
+  jointScreen: (side: ArmSide, joint: JointId) => { if (!builder) return null; const p = builder.posedWorldJoint(side, joint); return toScreen([p.x, p.y, p.z]); },
+  posedJoint: (side: ArmSide, joint: JointId | 'shoulder') => builder ? builder.posedWorldJoint(side, joint).toArray() : null,
+  setSkinMix: (m: number) => { if (builder) { builder.skinMix = m; builder.setPose(builder.pose); const D = display(); for (const d of placed) d.decal.setPositions(D); viewer.requestRender(); } },
   surfaceInfo: () => (surface ? { tris: surface.indices.length / 3, topology: surface.topology, labels: !!surface.labels } : null),
 };
 
