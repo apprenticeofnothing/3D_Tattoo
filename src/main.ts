@@ -2,7 +2,7 @@ import './style.css';
 import { Euler, Mesh, Object3D, Plane, Quaternion, Raycaster, Vector2, Vector3 } from 'three';
 import { fitToHeight } from './body/fit';
 import { makePlaceholderBody } from './body/placeholder';
-import { locateRegion, REGIONS, type RegionDef } from './body/regions';
+import { limbAxis, locatePartSpot, locateRegion, regionForSpot, REGIONS, type PartSpot, type RegionDef } from './body/regions';
 import { loadBodyFiles } from './io/loadMesh';
 import { createPicker } from './ui/picker';
 import { createSheet } from './ui/sheet';
@@ -15,8 +15,12 @@ import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles'
 import { TurntableRing } from './viewer/TurntableRing';
 import { wheelFactor } from './viewer/zoom';
 import { ExportDialog, type ExportChoice } from './ui/exportDialog';
-import { ExistingImport, type ImportResult } from './ui/existingImport';
-import { widthFromCircumference } from './existing/flatten';
+import { ExistingImport, type ImportAnalysis, type ImportResult } from './ui/existingImport';
+import { autoGuides } from './existing/autoGuide';
+import { detectPose } from './existing/poseModel';
+import { describeHint, HALF_WIDTH, maskEdges, suggestFromPose, type PoseHint } from './existing/poseSuggest';
+import type { Rgba } from './existing/image';
+import { widthFromCircumference, widthFromVisibleWidth } from './existing/flatten';
 import { tangentFrom } from './mapping/expmap';
 import { sourceImage, stencilPdf, stencilPng, stencilSvg } from './export/stencil';
 import { describeArea, describeRotation } from './export/placementText';
@@ -1381,15 +1385,100 @@ let lastExistingRegion = 'forearm-outer-left';
 const existingImport = new ExistingImport(document.body, {
   regions: REGIONS,
   initialRegionId: () => lastExistingRegion,
+  analyse: analyseExisting,
   place: placeExisting,
 });
+
+interface Suggestion { hint: PoseHint; spot: PartSpot; regionId?: string; text: string; rotation: number; flatPart: boolean }
+
+/**
+ * Find the person in the photo and work out where the tattoo is on the
+ * body. The landmark model runs in the browser; nothing is uploaded.
+ */
+const detections = new WeakMap<Rgba, Awaited<ReturnType<typeof detectPose>>>();
+async function analyseExisting(photo: Rgba, focus?: { x: number; y: number }): Promise<ImportAnalysis | null> {
+  // Detect once per photo; a tap on the tattoo only redoes the cheap part.
+  if (!detections.has(photo)) detections.set(photo, await detectPose(photo));
+  const det = detections.get(photo);
+  if (!det) return null;
+  const mask = det.mask ?? undefined;
+  const g = autoGuides(photo, mask, focus);
+  // A wide shot (whole torso in view): the tattoo is a small part of it; ask for a tap rather than guess.
+  const L = det.landmarks, seen = (i: number) => (L[i]?.visibility ?? 0) > 0.5;
+  const torsoPx = seen(11) && seen(12) && seen(23) && seen(24) ? Math.abs((L[11].y + L[12].y) / 2 - (L[23].y + L[24].y) / 2) * photo.height : 0;
+  const wide = torsoPx > photo.height * 0.15;
+  // Only trust the pose when the photo really shows the body (shoulders and
+  // hips clearly visible); in a close-up the model can invent a skeleton.
+  if (!wide) return null;
+  if (!focus) return { wide, hint: 'tap the tattoo in the photo to find where it is on the body' };
+  // The tap itself is the best position of the tattoo; otherwise the ink found near the middle.
+  const at = focus ?? (g.ink ? { x: (g.ink.x0 + g.ink.x1) / 2, y: (g.ink.y0 + g.ink.y1) / 2 } : { x: photo.width / 2, y: photo.height / 2 });
+  const make = (mirrored: boolean): Suggestion | null => {
+    const hint = suggestFromPose({ landmarks: det.landmarks, world: det.world, width: photo.width, height: photo.height, at, mirrored, mask });
+    if (!hint) return null;
+    const spot: PartSpot = { part: hint.part, side: hint.side, t: hint.t, u: hint.u, dir: new Vector3(...hint.surfaceDir) };
+    const flatPart = hint.part === 'torso' || hint.part === 'neck' || hint.part === 'head';
+    // On a flat area the photo's "up" is the design's top: turn it to match the body's up in the photo.
+    const phi = Math.atan2(hint.upInPhoto.x, -hint.upInPhoto.y);
+    return { hint, spot, regionId: regionForSpot(spot)?.id, text: describeHint(hint), rotation: flatPart ? (mirrored ? -phi : phi) : 0, flatPart };
+  };
+  const base = make(false);
+  // No body part under the tattoo: the detection is not trustworthy enough to steer the guides.
+  if (!base) return { hint: 'found a person, but not which part the tattoo is on. Tap the tattoo in the photo, or choose the place below' };
+  const a: ImportAnalysis = {
+    wide,
+    kind: base.flatPart ? 'flat' : 'limb',
+    regionId: base.regionId,
+    hint: base.text,
+    rotation: base.rotation,
+    personMask: mask,
+    place: { make },
+    pxPerCm: base.hint.pxPerHeight ? base.hint.pxPerHeight / (heightM() * 100) : undefined,
+    refine: (m) => { const r = make(m); return r ? { hint: r.text, regionId: r.regionId } : null; },
+  };
+  // Limb guides along the detected segment (body end first), edges from the person mask.
+  const seg = base.hint.segment;
+  if (!base.flatPart && seg) {
+    const len = Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) || 1;
+    const u = { x: (seg.b.x - seg.a.x) / len, y: (seg.b.y - seg.a.y) / len }, across = { x: u.y, y: -u.x };
+    let s0 = Infinity, s1 = -Infinity;
+    const box = g.ink ?? { x0: at.x - len * 0.15, y0: at.y - len * 0.15, x1: at.x + len * 0.15, y1: at.y + len * 0.15 };
+    for (const [x, y] of [[box.x0, box.y0], [box.x1, box.y0], [box.x1, box.y1], [box.x0, box.y1]]) {
+      const sv = (x - seg.a.x) * u.x + (y - seg.a.y) * u.y;
+      s0 = Math.min(s0, sv); s1 = Math.max(s1, sv);
+    }
+    const pad = (s1 - s0) * 0.12 + 4;
+    s0 -= pad; s1 += pad;
+    if (focus) {
+      // Keep the guides on this limb around the tap (the ink box can catch a hand or a crease).
+      const sf = (focus.x - seg.a.x) * u.x + (focus.y - seg.a.y) * u.y;
+      s0 = Math.max(s0, sf - 0.25 * len); s1 = Math.min(s1, sf + 0.25 * len);
+      if (s1 - s0 < 0.1 * len) { s0 = sf - 0.12 * len; s1 = sf + 0.12 * len; }
+    }
+    // Typical half-width for this part; the person mask is used when it agrees
+    // (it runs on into the body where a limb lies against it).
+    const expectHW = (HALF_WIDTH[base.hint.part] ?? 0.2) * len;
+    const edgesAt = (sv: number): [{ x: number; y: number }, { x: number; y: number }] => {
+      const c = { x: seg.a.x + u.x * sv, y: seg.a.y + u.y * sv };
+      const e = maskEdges(mask, photo.width, photo.height, c, across);
+      if (e) {
+        const hw = Math.hypot(e[1].x - e[0].x, e[1].y - e[0].y) / 2;
+        if (hw > 0.6 * expectHW && hw < 1.6 * expectHW) return e;
+      }
+      return [{ x: c.x - across.x * expectHW, y: c.y - across.y * expectHW }, { x: c.x + across.x * expectHW, y: c.y + across.y * expectHW }];
+    };
+    const [p0, q0] = edgesAt(s0), [p1, q1] = edgesAt(s1);
+    a.limb = { p0, q0, p1, q1, from: 0, to: 1 };
+  }
+  return a;
+}
 existingInput.addEventListener('change', () => { const f = existingInput.files?.[0]; existingInput.value = ''; if (f) void existingImport.open(f); });
 
 /**
  * Rotation that points the design's top along the limb towards the body
  * (where the photo's "body end" was), at a spot on the rest-pose surface.
  */
-function rotationTowardsBody(tri: number, point: [number, number, number], axis: [number, number, number]): number {
+function rotationTowardsBody(tri: number, point: [number, number, number], axis: [number, number, number], pointsToTrunk = false): number {
   if (!surface) return 0;
   const I = surface.indices, P = surface.positions;
   const a = I[tri * 3] * 3, b = I[tri * 3 + 1] * 3, c = I[tri * 3 + 2] * 3;
@@ -1398,7 +1487,7 @@ function rotationTowardsBody(tri: number, point: [number, number, number], axis:
   if (n.dot(new Vector3(N[I[tri * 3] * 3], N[I[tri * 3] * 3 + 1], N[I[tri * 3] * 3 + 2])) < 0) n.negate();
   const want = new Vector3(...axis);
   const toBody = new Vector3(0, heightM() * 0.55, 0).sub(new Vector3(...point));
-  if (want.dot(toBody) < 0) want.negate();
+  if (!pointsToTrunk && want.dot(toBody) < 0) want.negate();
   want.addScaledVector(n, -want.dot(n));
   if (want.lengthSq() < 1e-8) return 0;
   want.normalize();
@@ -1406,23 +1495,82 @@ function rotationTowardsBody(tri: number, point: [number, number, number], axis:
   return Math.atan2(new Vector3().crossVectors(up, want).dot(n), up.dot(want));
 }
 
+/**
+ * Direction of the whole body part under a triangle (bodies with part
+ * labels): steadier than the local shape near a joint, where the limb bends.
+ */
+function partAxisAt(tri: number): [number, number, number] | null {
+  if (!surface?.labels || !surface.partNames) return null;
+  const label = surface.labels[surface.indices[tri * 3]];
+  const name = surface.partNames[label] ?? '';
+  if (!/arm|thigh|shin|hand|foot/.test(name)) return null;
+  const sel: number[] = [];
+  for (let v = 0; v < surface.labels.length; v++) if (surface.labels[v] === label) sel.push(v);
+  if (sel.length <= 20) return null;
+  const P = surface.positions, { c, d } = limbAxis(P, sel);
+  // Point it at the end nearer the trunk: for arms the end nearer the body's
+  // centre line, for legs the higher end (as the region finder does).
+  let lo = Infinity, hi = -Infinity;
+  for (const v of sel) { const t = (P[v * 3] - c[0]) * d[0] + (P[v * 3 + 1] - c[1]) * d[1] + (P[v * 3 + 2] - c[2]) * d[2]; lo = Math.min(lo, t); hi = Math.max(hi, t); }
+  const end = (t: number) => [c[0] + d[0] * t, c[1] + d[1] * t, c[2] + d[2] * t];
+  const A = end(lo), B = end(hi);
+  const proxIsLo = Math.abs(A[0]) - A[1] * 0.5 < Math.abs(B[0]) - B[1] * 0.5;
+  return proxIsLo ? [-d[0], -d[1], -d[2]] : d;
+}
+
+/** Outward face normal of a rest-pose triangle. */
+function normalAtHit(tri: number): [number, number, number] {
+  if (!surface) return [0, 0, 1];
+  const I = surface.indices, P = surface.positions, N = surface.normals;
+  const a = I[tri * 3] * 3, b = I[tri * 3 + 1] * 3, c = I[tri * 3 + 2] * 3;
+  const n = new Vector3(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]).cross(new Vector3(P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2])).normalize();
+  if (n.x * N[a] + n.y * N[a + 1] + n.z * N[a + 2] < 0) n.negate();
+  return [n.x, n.y, n.z];
+}
+
 async function placeExisting(r: ImportResult): Promise<string | null> {
   if (!surface) return 'The body is still loading. Try again in a moment.';
   const def = REGIONS.find((x) => x.id === r.regionId);
-  const pose = def ? regionPose(def) : null;
+  // The spot suggested from the photo, unless the person chose another part.
+  const sugg = (r.place as { make(m: boolean): Suggestion | null } | undefined)?.make(r.mirrored) ?? null;
+  const useSpot = sugg && (!r.suggestedRegionId || r.regionId === r.suggestedRegionId);
+  let pose = null;
+  if (useSpot && surface.labels && surface.partNames) {
+    const posed = bodySource === 'builder' && builder && !isRestPose(builder.pose);
+    const shownBody = posed && builder ? { positions: builder.displayPositions(), normals: builder.displayNormals() } : undefined;
+    pose = locatePartSpot(sugg.spot, surface.positions, heightM(), { labels: surface.labels, names: surface.partNames }, shownBody);
+  }
+  pose ??= def ? regionPose(def) : null;
   if (!pose) return 'Could not find that part of this body. Pick another place.';
   const hit = skinAlong(pose.position, pose.target);
   if (!hit) return 'Could not find that part of this body. Pick another place.';
-  let width = r.widthCm, how = 'as you measured it';
-  let rotation = r.rotation;
+  // A measured width is the ink's own width; the image has a small margin around it.
+  let width = r.widthCm ? r.widthCm * (r.flattened.widthPhotoPx / r.flattened.inkWidthPhotoPx) : null, how = 'from your measurement';
+  let rotation = useSpot && sugg ? sugg.rotation : r.rotation;
   if (r.kind === 'limb') {
-    const c = circumferenceAt(surface, hit, display());
+    // Cross-section of the limb at the spot (rest pose, like the anchor).
+    const c = circumferenceAt(surface, hit);
     if (c) {
-      if (!width) { width = widthFromCircumference(r.flattened, c.length * 100); how = 'worked out from the width of the limb'; }
-      rotation = rotationTowardsBody(hit.tri, hit.point, c.axis);
+      if (!width) {
+        // The limb's width across, seen from the side the photo was taken
+        // from (the suggested direction, or straight at the skin there).
+        const ax = new Vector3(...c.axis);
+        const look = useSpot && sugg ? sugg.spot.dir.clone() : new Vector3(...normalAtHit(hit.tri));
+        const across = new Vector3().crossVectors(ax, look);
+        if (across.lengthSq() > 1e-8) {
+          across.normalize();
+          let lo = Infinity, hi = -Infinity;
+          for (let i = 0; i < c.points.length; i += 3) { const d = c.points[i] * across.x + c.points[i + 1] * across.y + c.points[i + 2] * across.z; lo = Math.min(lo, d); hi = Math.max(hi, d); }
+          width = widthFromVisibleWidth(r.flattened, (hi - lo) * 100);
+        }
+        width ??= widthFromCircumference(r.flattened, c.length * 100);
+        how = 'worked out from the width of the limb';
+      }
+      const toTrunk = partAxisAt(hit.tri);
+      rotation = toTrunk ? rotationTowardsBody(hit.tri, hit.point, toTrunk, true) : rotationTowardsBody(hit.tri, hit.point, c.axis);
     }
   }
-  if (!width && r.estimateCm) { width = r.estimateCm; how = 'estimated from the photo'; }
+  if (!width && r.estimateCm) { width = r.estimateCm; how = 'estimated roughly from body proportions in the photo'; }
   if (!width) { width = 10; how = 'a starting guess'; }
   width = Math.round(Math.min(150, Math.max(1, width)) * 10) / 10;
   const entry = await designs.addImage(r.canvas, r.name, width);
@@ -1554,6 +1702,67 @@ try {
   viewFrom: (yaw: number) => viewer.viewFrom(yaw, heightM()),
   zoomDistance: () => viewer.zoomDistance(),
   deselect: () => select(null),
+  /**
+   * The forearm's true outline around a placed design as seen now, as limb
+   * guides in canvas pixels (elbow end first): what a person would drag the
+   * editor's handles to.
+   */
+  trueForearmGuides: (id: string, side: ArmSide, halfLenPx: number) => {
+    const d = placed.find((x) => x.placement.id === id);
+    if (!d || !surface || !builder) return null;
+    const c = circumferenceAt(surface, d.placement, display());
+    if (!c) return null;
+    const rect = viewer.renderer.domElement.getBoundingClientRect();
+    const scr = (p: number[]) => { const s = toScreen([p[0], p[1], p[2]]); return { x: s.x - rect.left, y: s.y - rect.top }; };
+    const e = scr(builder.posedWorldJoint(side, 'elbow').toArray()), w = scr(builder.posedWorldJoint(side, 'wrist').toArray());
+    const ul = Math.hypot(w.x - e.x, w.y - e.y) || 1, u = { x: (w.x - e.x) / ul, y: (w.y - e.y) / ul }, v = { x: u.y, y: -u.x };
+    let lo = Infinity, hi = -Infinity, loP = { x: 0, y: 0 }, hiP = { x: 0, y: 0 };
+    for (let i = 0; i < c.points.length; i += 3) {
+      const p = scr([c.points[i], c.points[i + 1], c.points[i + 2]]), t = p.x * v.x + p.y * v.y;
+      if (t < lo) { lo = t; loP = p; } if (t > hi) { hi = t; hiP = p; }
+    }
+    const mv = (p: { x: number; y: number }, k: number) => ({ x: p.x + u.x * k, y: p.y + u.y * k });
+    return { p0: mv(loP, -halfLenPx), p1: mv(loP, halfLenPx), q0: mv(hiP, -halfLenPx), q1: mv(hiP, halfLenPx) };
+  },
+  /** Ink area (cm²), and the 3D point of the red ink's centre, of a placed design (for checking imports). */
+  inkStats: (id?: string) => {
+    const d = id ? placed.find((x) => x.placement.id === id) : selected;
+    if (!d || !surface || !d.result) return null;
+    const img = d.placement.design.texture.image as HTMLCanvasElement | ImageBitmap;
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const ctx = c.getContext('2d')!; ctx.drawImage(img as CanvasImageSource, 0, 0);
+    const px = ctx.getImageData(0, 0, c.width, c.height).data;
+    let ink = 0, rx = 0, ry = 0, rn = 0, sa = 0, sx = 0, sy = 0;
+    const W = d.widthM, H = d.heightM, cmx = (W * 100) / c.width, cmy = (H * 100) / c.height;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const i = (y * c.width + x) * 4, a = px[i + 3] / 255;
+      if (px[i + 3] > 127) ink++;
+      sa += a; sx += a * x * cmx; sy += a * y * cmy;
+      if (px[i + 3] > 127 && px[i] > 2 * px[i + 1] && px[i] > 60) { rx += x + 0.5; ry += y + 0.5; rn++; }
+    }
+    // Spread of the ink around its centre (cm), weighted by ink strength: a size measure that
+    // does not depend on rotation or on how dark the ink came out.
+    const mx = sx / (sa || 1), my = sy / (sa || 1);
+    let sr = 0;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const a = px[(y * c.width + x) * 4 + 3] / 255;
+      if (a > 0) sr += a * ((x * cmx - mx) ** 2 + (y * cmy - my) ** 2);
+    }
+    const spread = Math.sqrt(sr / (sa || 1));
+    const area = (ink / (c.width * c.height)) * W * H * 1e4;
+    let red: number[] | null = null;
+    if (rn) {
+      let u = (rx / rn / c.width - 0.5) * W; const v = (0.5 - ry / rn / c.height) * H;
+      if (d.placement.mirror) u = -u;
+      red = d.surfacePoint(surface, u, v, 0, display());
+    }
+    const p = d.placement;
+    // The ink's own centre on the skin (not the image's: a margin or stray marks shift that).
+    let cu = mx / 100 - W / 2; const cv = H / 2 - my / 100;
+    if (p.mirror) cu = -cu;
+    const inkCentre = d.surfacePoint(surface, cu, cv, 0, display()) ?? shown(p.tri, p.point);
+    return { area, spread, red, centre: inkCentre, anchor: shown(p.tri, p.point), widthCm: p.widthCm, heightCm: d.result.heightCm, id: p.id };
+  },
   cameraDir: () => { const v = new Vector3(); viewer.camera.getWorldDirection(v); return [v.x, v.y, v.z]; },
   lookAt: (pos: number[], target: number[]) => viewer.flyTo({ position: new Vector3(pos[0], pos[1], pos[2]), target: new Vector3(target[0], target[1], target[2]) }, 1),
   /** The view as a JPEG data URL without handles, ring or overlays (a stand-in for a phone photo). */
@@ -1566,7 +1775,14 @@ try {
       return await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsDataURL(blob); });
     } finally { helpers.forEach((g, i) => { g.visible = was[i]; }); viewer.requestRender(); }
   },
-  openExistingPhoto: async (dataUrl: string, name = 'photo.jpg') => { const blob = await (await fetch(dataUrl)).blob(); await existingImport.open(new File([blob], name, { type: blob.type })); },
+  openExistingPhoto: async (dataUrl: string, name = 'photo.jpg', fPx?: number) => {
+    const blob = await (await fetch(dataUrl)).blob();
+    if (!fPx) { await existingImport.open(new File([blob], name, { type: blob.type })); return; }
+    const { loadPhoto } = await import('./ui/existingImport');
+    await existingImport.openImage(await loadPhoto(blob), name.replace(/\.[a-z0-9]+$/i, ''), fPx);
+  },
+  /** Focal length of the view camera in canvas pixels (what a photo of the view was taken with). */
+  cameraFocalPx: () => (viewer.size().height * viewer.renderer.getPixelRatio()) / 2 / Math.tan((viewer.camera.fov * Math.PI) / 360),
   existingImport,
   openExport, runExport, sizeTagText: () => (sizeTag.classList.contains('hidden') ? null : sizeTag.textContent), placementLines: () => (selected ? placementLines(selected) : null),
   zoomSettled: () => viewer.isSettled(),

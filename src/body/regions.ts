@@ -113,7 +113,7 @@ function labelledVertices(positions: Float32Array, lab: PartLabels, parts: strin
   return out;
 }
 
-function limbAxis(positions: Float32Array, sel: number[]): { c: [number, number, number]; d: [number, number, number] } {
+export function limbAxis(positions: Float32Array, sel: number[]): { c: [number, number, number]; d: [number, number, number] } {
   let cx = 0, cy = 0, cz = 0;
   for (const v of sel) { cx += positions[v * 3]; cy += positions[v * 3 + 1]; cz += positions[v * 3 + 2]; }
   cx /= sel.length; cy /= sel.length; cz /= sel.length;
@@ -250,4 +250,74 @@ export function viewDirection(def: RegionDef): Vector3 {
     case 'inner': return new Vector3(-(sideSign || 1), -0.1, 0.6).normalize();
     case 'top': return new Vector3(0, 1, 0.7).normalize();
   }
+}
+
+/** A spot described by a photo: a part, a fraction along it, and the direction it faces (body frame = world here). */
+export interface PartSpot {
+  part: 'upperarm' | 'forearm' | 'hand' | 'thigh' | 'shin' | 'foot' | 'torso' | 'neck' | 'head';
+  side: Side;
+  /** Along the limb from the trunk end (0..1); down the torso from the shoulders (0) to the hip joints (1). */
+  t: number;
+  /** Torso: across from the person's right (0) to their left (1). */
+  u?: number;
+  /** Direction from the body towards the spot (unit, x = the person's left, y up, z front). */
+  dir: Vector3;
+}
+
+/**
+ * Camera pose looking at a spot on a body with part labels (body builder).
+ * Returns null when the body has no labels for that part.
+ */
+export function locatePartSpot(spot: PartSpot, positions: Float32Array, height: number, lab: PartLabels, shown?: Shown): RegionPose | null {
+  const stub = { part: spot.part === 'torso' || spot.part === 'neck' ? 'torso' : spot.part === 'head' ? 'head' : ['thigh', 'shin', 'foot'].includes(spot.part) ? 'leg' : 'arm' } as RegionDef;
+  let dir = spot.dir.clone().normalize();
+  if (spot.part === 'torso' || spot.part === 'neck' || spot.part === 'head') {
+    const all = labelledVertices(positions, lab, [spot.part], 'center');
+    if (!all.length) return null;
+    // Shoulder line about 0.81 of the height, hip joints about 0.52 (as in REGIONS).
+    const y = (spot.part === 'torso' ? 0.81 - (0.81 - 0.52) * spot.t : spot.part === 'neck' ? 0.845 : 0.93) * height;
+    let band = all.filter((v) => Math.abs(positions[v * 3 + 1] - y) < 0.03 * height);
+    if (band.length < 6) band = all;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of band) { lo = Math.min(lo, positions[v * 3]); hi = Math.max(hi, positions[v * 3]); }
+    const x = lo + (hi - lo) * (spot.u ?? 0.5); // the person's right is -X
+    const sel = band.filter((v) => Math.abs(positions[v * 3] - x) < 0.04 * height);
+    return poseFrom(positions, sel.length >= 6 ? sel : band, dir, stub, height, shown);
+  }
+  const sel = labelledVertices(positions, lab, [spot.part], spot.side, Math.max(0, spot.t - 0.06), Math.min(1, spot.t + 0.06));
+  if (sel.length < 6) return null;
+  const { d } = limbAxis(positions, sel);
+  const a = new Vector3(...d);
+  const perp = dir.clone().addScaledVector(a, -dir.dot(a));
+  if (perp.lengthSq() > 1e-6) dir = perp.normalize();
+  return poseFrom(positions, sel, dir, stub, height, shown);
+}
+
+/** The listed region that best matches a spot (for bodies without labels, and for naming it). */
+export function regionForSpot(spot: PartSpot): RegionDef | null {
+  const part = spot.part;
+  const ids: string[] =
+    part === 'upperarm' ? ['upper-arm-outer', 'upper-arm-inner', 'shoulder'] :
+    part === 'forearm' ? ['forearm-outer', 'forearm-inner'] :
+    part === 'hand' ? ['hand'] :
+    part === 'thigh' ? ['thigh-front', 'thigh-back', 'thigh-outer'] :
+    part === 'shin' ? ['shin', 'calf'] :
+    part === 'foot' ? ['foot'] :
+    part === 'neck' ? ['neck-front', 'neck-back'] :
+    part === 'head' ? ['head-front', 'head-back'] :
+    spot.t < 0.45 ? ['chest', 'upper-back', 'ribs'] : ['stomach', 'lower-back', 'ribs', 'hip'];
+  const sideOf = (base: string) => {
+    if (REGIONS.some((r) => r.id === base)) return [base];
+    const s = spot.side === 'center' ? ((spot.u ?? 0.5) >= 0.5 ? 'left' : 'right') : spot.side;
+    return [`${base}-${s}`];
+  };
+  let best: RegionDef | null = null, bestDot = -Infinity;
+  for (const id of ids.flatMap(sideOf)) {
+    const def = REGIONS.find((r) => r.id === id);
+    if (!def) continue;
+    let d = viewDirection(def).dot(spot.dir);
+    if (part === 'upperarm' && def.id.startsWith('shoulder')) d += spot.t < 0.2 ? 0.3 : -0.5;
+    if (d > bestDot) { bestDot = d; best = def; }
+  }
+  return best;
 }

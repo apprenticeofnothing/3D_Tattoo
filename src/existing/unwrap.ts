@@ -75,7 +75,7 @@ export function limbFrame(g: LimbGuide): LimbFrame {
 
 export interface UnwrapResult {
   image: Rgba;
-  /** Limb radius in photo pixels at the middle of the unwrapped band. */
+  /** Limb radius in photo pixels at the front of the limb, middle of the band (the scale of the output). */
   radiusPx: number;
   /** Output pixels per photo pixel (both axes). */
   scale: number;
@@ -84,15 +84,32 @@ export interface UnwrapResult {
 /**
  * Unwrap the limb between axial fractions `from`..`to` (0 = body-end handles,
  * 1 = far-end handles) up to `maxAngleDeg` either side of the line facing
- * the camera. Output pixels are skin length in photo-pixel units times `scale`.
+ * the camera. Output pixels are skin length in units of the photo's pixel
+ * size at the front of the limb, times `scale`.
+ *
+ * With `fPx` (the camera's focal length in photo pixels) perspective is
+ * taken into account: a close camera sees the limb's outline from nearer
+ * the side, so the outline looks narrower than the front of the limb. For
+ * a cylinder of radius R whose axis is D away, a point at angle θ appears
+ * at f·R·sin θ / (D − R·cos θ) from the axis, and the outline at the angle
+ * where the line of sight grazes it (sin α = R/D, half-width f·tan α).
+ * So the apparent half-width alone gives D/R. Without `fPx` the camera is
+ * taken to be far away (orthographic).
  */
-export function unwrapLimb(img: Rgba, g: LimbGuide, opts: { from?: number; to?: number; maxAngleDeg?: number; scale?: number; maxSide?: number } = {}): UnwrapResult {
+export function unwrapLimb(img: Rgba, g: LimbGuide, opts: { from?: number; to?: number; maxAngleDeg?: number; scale?: number; maxSide?: number; fPx?: number } = {}): UnwrapResult {
   const f = limbFrame(g);
   const from = opts.from ?? 0, to = opts.to ?? 1;
   const t0 = Math.min(from, to) * f.length, t1 = Math.max(from, to) * f.length;
-  const th = ((opts.maxAngleDeg ?? 70) * Math.PI) / 180;
-  const rMax = Math.max(f.at(t0).r, f.at(t1).r, 1);
-  const halfW = rMax * th;
+  const thMax = ((opts.maxAngleDeg ?? 70) * Math.PI) / 180;
+  const fPx = opts.fPx;
+  // Per row: radius of the front in photo pixels, D/R, and the usable angle.
+  const rowModel = (hw: number) => {
+    if (!fPx || hw <= 0) return { rFront: hw, k: Infinity, th: thMax };
+    const k = 1 / Math.sin(Math.atan(hw / fPx));
+    return { rFront: fPx / (k - 1), k, th: Math.min(thMax, Math.acos(1 / k) * 0.97) };
+  };
+  const m0 = rowModel(f.at(t0).r), m1 = rowModel(f.at(t1).r);
+  const halfW = Math.max(m0.rFront * m0.th, m1.rFront * m1.th, 1);
   let scale = opts.scale ?? 1;
   const maxSide = opts.maxSide ?? 2400;
   scale = Math.min(scale, maxSide / Math.max(2 * halfW, t1 - t0, 1));
@@ -103,17 +120,19 @@ export function unwrapLimb(img: Rgba, g: LimbGuide, opts: { from?: number; to?: 
     const t = t0 + (y + 0.5) / scale;
     const { c, r } = f.at(t);
     if (r < 0.5) continue;
+    const m = rowModel(r);
     for (let x = 0; x < W; x++) {
-      const s = (x + 0.5) / scale - halfW; // length along the skin from the centre line (photo px)
-      const a = s / r;
-      if (Math.abs(a) > th) continue;
-      const q = add(c, mul(f.v, r * Math.sin(a)));
+      const s = (x + 0.5) / scale - halfW; // length along the skin from the centre line (front pixels)
+      const a = s / m.rFront;
+      if (Math.abs(a) > m.th) continue;
+      const off = m.k === Infinity ? r * Math.sin(a) : (fPx! * Math.sin(a)) / (m.k - Math.cos(a));
+      const q = add(c, mul(f.v, off));
       if (!sampleBilinear(img, q.x, q.y, px)) continue;
       const o = (y * W + x) * 4;
       out.data[o] = px[0]; out.data[o + 1] = px[1]; out.data[o + 2] = px[2]; out.data[o + 3] = px[3];
     }
   }
-  return { image: out, radiusPx: f.at((t0 + t1) / 2).r, scale };
+  return { image: out, radiusPx: rowModel(f.at((t0 + t1) / 2).r).rFront, scale };
 }
 
 /** 3x3 homography (row-major) mapping the unit square to a quad (q0 top-left, q1 top-right, q2 bottom-right, q3 bottom-left). */

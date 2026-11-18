@@ -3,10 +3,11 @@
 // corners on a flat area), check the preview, say where it is, place it.
 
 import type { RegionDef } from '../body/regions';
-import { autoGuides } from '../existing/autoGuide';
+import { autoGuides, maskOutside, type Guides } from '../existing/autoGuide';
 import { flattenTattoo, type Flattened, type SurfaceKind } from '../existing/flatten';
 import type { Rgba } from '../existing/image';
 import { limbFrame, type LimbGuide, type Pt } from '../existing/unwrap';
+import { DEFAULT_FOCAL_35, focal35FromJpeg, focalPx } from '../existing/exif';
 
 /** What a pose model (or other analysis) could tell about the photo. */
 export interface ImportAnalysis {
@@ -24,6 +25,12 @@ export interface ImportAnalysis {
   rotation?: number;
   mirrored?: boolean;
   personMask?: { data: Float32Array; width: number; height: number };
+  /** Photo pixels per cm of skin, roughly (from body proportions). */
+  pxPerCm?: number;
+  /** The photo shows much of the body: good for where, too small for the design itself. */
+  wide?: boolean;
+  /** Redo the suggestion when the person says the photo was taken in a mirror. */
+  refine?(mirrored: boolean): { hint?: string; regionId?: string } | null;
 }
 
 export interface ImportResult {
@@ -36,6 +43,9 @@ export interface ImportResult {
   /** Rough width estimated from the photo, if any. */
   estimateCm: number | null;
   regionId: string;
+  /** The region the analysis suggested (if the person picked another, the suggestion is ignored). */
+  suggestedRegionId?: string;
+  mirrored: boolean;
   place?: unknown;
   rotation: number;
 }
@@ -43,7 +53,8 @@ export interface ImportResult {
 export interface ImportHooks {
   regions: RegionDef[];
   initialRegionId(): string;
-  analyse?(photo: Rgba): Promise<ImportAnalysis | null>;
+  /** `focus`: a point on the tattoo the person tapped (photo pixels). */
+  analyse?(photo: Rgba, focus?: Pt): Promise<ImportAnalysis | null>;
   /** Place the result; resolve with an error message, or null when done. */
   place(r: ImportResult): Promise<string | null>;
 }
@@ -103,10 +114,16 @@ export class ExistingImport {
   private floor: number | undefined;
   private analysis: ImportAnalysis | null = null;
   private touched = false;
-  private drag: { h: Handle; last: Pt; pointer: Pt } | null = null;
+  private drag: { h: Handle; last: Pt; pointer: Pt; start: Pt; moved: boolean } | null = null;
+  private focus: Pt | undefined;
+  /** Camera focal length in pixels of `photo`, and where it came from. */
+  private fPx = 0;
+  private lens = '';
   private view = { s: 1, ox: 0, oy: 0 };
   private previewTimer = 0;
   private lastFlat: Flattened | null = null;
+  /** Photo (and preview copy) with the background made transparent, from the latest guides. */
+  private masked: { full: Rgba; small: Rgba } | null = null;
 
   constructor(root: HTMLElement, private hooks: ImportHooks) {
     this.el = document.createElement('div');
@@ -129,11 +146,16 @@ export class ExistingImport {
             <button class="btn" data-swap>Swap ends</button>
             <label class="check"><input type="checkbox" data-mirror> Taken in a mirror</label>
           </div>
+          <div class="ex-closeup hidden">
+            <p class="muted">This photo shows where the tattoo is, but it is small in it. For a sharp copy of the design, add a close-up too.</p>
+            <button class="btn" data-closeup>Add a close-up for the design</button>
+            <input type="file" accept="image/*" class="hidden" data-closeup-file>
+          </div>
           <div class="ex-preview"><canvas></canvas></div>
           <label class="field ex-clean">Remove skin texture <input type="range" min="0" max="100" value="30" data-clean></label>
           <label class="field">Where on the body <select data-region></select></label>
           <p class="muted ex-hint"></p>
-          <label class="field">Width along the skin <input type="number" inputmode="decimal" min="0.5" max="150" step="0.1" placeholder="estimate" data-width> cm</label>
+          <label class="field">Tattoo width, left to right in the preview <input type="number" inputmode="decimal" min="0.5" max="150" step="0.1" placeholder="estimate" data-width> cm</label>
           <p class="muted ex-width-tip"></p>
           <button class="btn primary ex-go" data-go>Place on body</button>
         </div>
@@ -163,9 +185,19 @@ export class ExistingImport {
       this.limb = { p0: l.p1, p1: l.p0, q0: l.q1, q1: l.q0, from: 1 - l.to, to: 1 - l.from };
       this.touched = true; this.draw(); this.schedulePreview(0);
     });
-    this.mirrorIn.addEventListener('change', () => this.schedulePreview(0));
+    this.mirrorIn.addEventListener('change', () => {
+      const r = this.analysis?.refine?.(this.mirrorIn.checked);
+      if (r && this.analysis) {
+        if (r.regionId) { this.analysis.regionId = r.regionId; this.regionSel.value = r.regionId; }
+        this.hintEl.textContent = r.hint ? `Suggested: ${r.hint}. You can fine-tune it on the body.` : '';
+      }
+      this.schedulePreview(0);
+    });
     this.cleanIn.addEventListener('input', () => { this.floor = 0.03 + (Number(this.cleanIn.value) / 100) * 0.42; this.schedulePreview(120); });
     q('[data-go]').addEventListener('click', () => void this.go());
+    const closeFile = q<HTMLInputElement>('[data-closeup-file]');
+    q('[data-closeup]').addEventListener('click', () => closeFile.click());
+    closeFile.addEventListener('change', () => { const f = closeFile.files?.[0]; closeFile.value = ''; if (f) void this.useCloseUp(f); });
     this.stage.addEventListener('pointerdown', (e) => this.onDown(e));
     this.stage.addEventListener('pointermove', (e) => this.onMove(e));
     this.stage.addEventListener('pointerup', (e) => this.onUp(e));
@@ -185,35 +217,45 @@ export class ExistingImport {
       this.setStatus('Could not read that photo. Try a JPEG or PNG (on a Mac, export HEIC photos as JPEG).');
       return;
     }
+    this.setLens(await file.arrayBuffer().then(focal35FromJpeg).catch(() => null), this.photo);
     await this.start();
   }
 
   /** Open with an image already decoded (tests, other sources). */
-  async openImage(img: Rgba, name: string): Promise<void> {
+  async openImage(img: Rgba, name: string, fPx?: number): Promise<void> {
     this.el.classList.remove('hidden');
     this.name = name;
     this.photo = img;
+    this.setLens(null, img);
+    if (fPx) { this.fPx = fPx; this.lens = 'given'; }
     await this.start();
+  }
+
+  /** Focal length for perspective correction: from the photo's EXIF, else a phone's main camera. */
+  private setLens(focal35: number | null, img: Rgba) {
+    this.fPx = focalPx(focal35 ?? DEFAULT_FOCAL_35, img.width, img.height);
+    this.lens = focal35 ? `${focal35} mm lens (from the photo)` : `${DEFAULT_FOCAL_35} mm lens assumed (a phone's main camera)`;
   }
 
   private async start() {
     const photo = this.photo!;
     this.photoCanvas = rgbaToCanvas(photo);
     this.small = downscaleRgba(photo, 900);
-    this.analysis = null; this.touched = false; this.floor = undefined; this.lastFlat = null;
+    this.analysis = null; this.touched = false; this.floor = undefined; this.lastFlat = null; this.focus = undefined;
     this.widthIn.value = '';
     this.mirrorIn.checked = false;
     this.regionSel.value = this.hooks.initialRegionId();
     this.hintEl.textContent = '';
     const g = autoGuides(photo);
     this.limb = g.limb; this.quad = g.quad;
+    this.setBody(g);
     this.setKind(g.limbLike ? 'limb' : 'flat');
     this.layout();
     this.schedulePreview(0);
     if (this.hooks.analyse) {
       this.setStatus('Looking for the body in the photo…');
       let a: ImportAnalysis | null = null;
-      try { a = await this.hooks.analyse(photo); } catch (err) { console.warn(err); }
+      try { a = await this.hooks.analyse(photo, this.focus); } catch (err) { console.warn(err); }
       if (this.photo !== photo) return; // another photo was opened meanwhile
       this.applyAnalysis(a);
     } else this.setStatus('');
@@ -221,11 +263,13 @@ export class ExistingImport {
 
   private applyAnalysis(a: ImportAnalysis | null) {
     this.analysis = a;
+    (this.el.querySelector('.ex-closeup') as HTMLElement).classList.toggle('hidden', !a?.wide || !a.regionId);
     if (!a) { this.setStatus('No body found in the photo: choose where it is below.'); this.updateWidthTip(); return; }
     if (!this.touched) {
       if (a.personMask && this.photo) {
-        const g = autoGuides(this.photo, a.personMask);
+        const g = autoGuides(this.photo, a.personMask, this.focus);
         this.limb = g.limb; this.quad = g.quad;
+        this.setBody(g);
       }
       if (a.limb) this.limb = a.limb;
       if (a.quad) this.quad = a.quad;
@@ -233,10 +277,35 @@ export class ExistingImport {
       if (a.mirrored !== undefined) this.mirrorIn.checked = a.mirrored;
     }
     if (a.regionId) this.regionSel.value = a.regionId;
-    this.hintEl.textContent = a.hint ? `Suggested: ${a.hint}. You can fine-tune it on the body.` : '';
+    this.hintEl.textContent = !a.hint ? '' : a.regionId ? `Suggested: ${a.hint}. You can fine-tune it on the body.` : `${a.hint[0].toUpperCase()}${a.hint.slice(1)}.`;
     this.setStatus('');
     this.updateWidthTip();
     this.draw();
+    this.schedulePreview(0);
+  }
+
+  /** Swap in a close-up of the same tattoo for the design, keeping where it is from the wide photo. */
+  async useCloseUp(file: Blob, fPx?: number): Promise<void> {
+    let img: Rgba;
+    try { img = await loadPhoto(file); } catch { this.setStatus('Could not read that photo. Try a JPEG or PNG.'); return; }
+    this.setLens(await file.arrayBuffer().then(focal35FromJpeg).catch(() => null), img);
+    if (fPx) { this.fPx = fPx; this.lens = 'given'; }
+    await this.swapPhoto(img);
+  }
+
+  async swapPhoto(img: Rgba): Promise<void> {
+    const keep = this.analysis;
+    this.photo = img;
+    this.photoCanvas = rgbaToCanvas(img);
+    this.small = downscaleRgba(img, 900);
+    this.focus = undefined; this.touched = false; this.lastFlat = null;
+    const g = autoGuides(img);
+    this.limb = g.limb; this.quad = g.quad;
+    this.setBody(g);
+    this.analysis = keep ? { ...keep, wide: false, personMask: undefined, limb: undefined, quad: undefined, pxPerCm: undefined } : null;
+    (this.el.querySelector('.ex-closeup') as HTMLElement).classList.add('hidden');
+    this.setStatus('Where it is comes from the first photo, the design from this close-up.');
+    this.layout();
     this.schedulePreview(0);
   }
 
@@ -247,13 +316,19 @@ export class ExistingImport {
 
   private setStatus(t: string) { this.status.textContent = t; }
 
+  /** Remember where the body is, so background inside the guides never becomes ink. */
+  private setBody(g: Guides) {
+    if (!this.photo || !this.small || !g.body) { this.masked = null; return; }
+    this.masked = { full: maskOutside(this.photo, g.body), small: maskOutside(this.small.img, g.body) };
+  }
+
   private setKind(k: SurfaceKind) {
     this.kind = k;
     this.el.querySelectorAll<HTMLButtonElement>('.ex-kind .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.kind === k));
     (this.el.querySelector('[data-swap]') as HTMLElement).classList.toggle('hidden', k !== 'limb');
     (this.el.querySelector('.ex-tip') as HTMLElement).textContent = k === 'limb'
-      ? 'Drag the round handles so the blue lines follow both edges of the arm or leg, and the orange bars sit just past the ends of the tattoo. ▲ marks the end nearer the body. Drag inside to move everything.'
-      : 'Drag the four corners around the tattoo. If it was photographed at an angle, put the corners on a shape you know is square. The top edge is the top of the design. Drag inside to move everything.';
+      ? 'Tap the tattoo if the handles are not around it. Drag the round handles so the blue lines follow both edges of the arm or leg and the orange bars sit just past the ends of the tattoo. ▲ marks the end nearer the body.'
+      : 'Tap the tattoo if the box is not around it. Drag the four corners around the tattoo; if it was photographed at an angle, put them on a shape you know is square. The top edge is the top of the design.';
     this.updateWidthTip();
     this.draw();
     this.schedulePreview(0);
@@ -261,10 +336,18 @@ export class ExistingImport {
 
   private updateWidthTip() {
     const tip = this.el.querySelector('.ex-width-tip') as HTMLElement;
-    const est = this.analysis?.widthCm;
+    const est = this.estimateCm();
     tip.textContent = this.kind === 'limb'
-      ? 'Leave empty to work it out from the width of the arm or leg on the body. A tape-measure reading along the skin is more exact.'
-      : est ? `Estimated from the photo: about ${est.toFixed(1)} cm. A tape-measure reading along the skin is more exact.` : 'Measure across the tattoo along the skin with a tape measure. Leave empty for 10 cm and resize it on the body.';
+      ? `Leave empty to work it out from the width of the arm or leg on the body (perspective corrected for a ${this.lens}). A tape-measure reading along the skin is more exact.`
+      : est ? `Estimated from the photo: about ${est.toFixed(1)} cm. A tape-measure reading along the skin is more exact.` : 'Measure the tattoo from its left to its right edge along the skin with a tape measure. Leave empty for 10 cm and resize it on the body.';
+  }
+
+  /** Rough width from the photo's body proportions (flat areas), using the latest preview. */
+  private estimateCm(): number | undefined {
+    const a = this.analysis;
+    if (!a) return undefined;
+    if (a.pxPerCm && this.lastFlat && !this.lastFlat.empty && this.small) return this.lastFlat.widthPhotoPx / this.small.s / a.pxPerCm;
+    return a.widthCm;
   }
 
   // ---------- Drawing ----------
@@ -285,6 +368,13 @@ export class ExistingImport {
   }
 
   private toScreen(p: Pt): Pt { return { x: this.view.ox + p.x * this.view.s, y: this.view.oy + p.y * this.view.s }; }
+  /** Photo-pixel positions of the handles (for tests that drag them as a person would). */
+  handlePositions(): Record<string, Pt> {
+    return Object.fromEntries(this.handles().map(({ h, p }) => [h.kind, p]));
+  }
+
+  /** Page coordinates of a photo pixel (for tests that tap the photo). */
+  photoToClient(p: Pt): Pt { const r = this.stage.getBoundingClientRect(), s = this.toScreen(p); return { x: r.left + s.x, y: r.top + s.y }; }
   private toPhoto(p: Pt): Pt { return { x: (p.x - this.view.ox) / this.view.s, y: (p.y - this.view.oy) / this.view.s }; }
 
   /** Handle positions in photo pixels. */
@@ -393,12 +483,11 @@ export class ExistingImport {
       const s = this.toScreen(p), d = Math.hypot(s.x - sp.x, s.y - sp.y);
       if (d < bd) { bd = d; best = h; }
     }
-    if (!best && this.inside(this.toPhoto(sp))) best = { kind: 'body' };
-    if (!best) return;
+    // Anywhere else starts a "body" press: a drag inside the area moves it, a tap anywhere finds the tattoo there.
+    if (!best) best = { kind: 'body' };
     e.preventDefault();
     this.stage.setPointerCapture(e.pointerId);
-    this.drag = { h: best, last: this.toPhoto(sp), pointer: sp };
-    this.touched = true;
+    this.drag = { h: best, last: this.toPhoto(sp), pointer: sp, start: sp, moved: false };
     this.draw();
   }
 
@@ -418,6 +507,9 @@ export class ExistingImport {
     const p = this.toPhoto(sp);
     const clamp = (q: Pt): Pt => ({ x: Math.max(0, Math.min(this.photo!.width, q.x)), y: Math.max(0, Math.min(this.photo!.height, q.y)) });
     const k = this.drag.h.kind;
+    if (!this.drag.moved && Math.hypot(sp.x - this.drag.start.x, sp.y - this.drag.start.y) < 6) return;
+    if (k === 'body' && !this.drag.moved && !this.inside(this.toPhoto(this.drag.start))) return; // outside: only taps count
+    this.drag.moved = true; this.touched = true;
     const dx = p.x - this.drag.last.x, dy = p.y - this.drag.last.y;
     const L = this.limb;
     if (k === 'body') {
@@ -446,9 +538,31 @@ export class ExistingImport {
   private onUp(e: PointerEvent) {
     if (!this.drag) return;
     try { this.stage.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    const tap = !this.drag.moved && this.drag.h.kind === 'body' ? this.toPhoto(this.drag.start) : null;
     this.drag = null;
     this.draw();
+    if (tap && e.type === 'pointerup') void this.refocus(tap);
+    else this.schedulePreview(0);
+  }
+
+  /** The person tapped the tattoo: look for it there and redo the suggestion. */
+  async refocus(p: Pt): Promise<void> {
+    if (!this.photo) return;
+    this.focus = p;
+    this.touched = false;
+    const photo = this.photo;
+    const g = autoGuides(photo, this.analysis?.personMask, p);
+    this.limb = g.limb; this.quad = g.quad;
+    this.setBody(g);
+    this.draw();
     this.schedulePreview(0);
+    if (this.hooks.analyse && this.analysis) {
+      this.setStatus('Finding where that is on the body…');
+      let a: ImportAnalysis | null = null;
+      try { a = await this.hooks.analyse(photo, p); } catch (err) { console.warn(err); }
+      if (this.photo !== photo) return;
+      this.applyAnalysis(a);
+    }
   }
 
   // ---------- Preview and result ----------
@@ -462,6 +576,7 @@ export class ExistingImport {
       quad: this.quad.map(sc) as [Pt, Pt, Pt, Pt],
       mirrored: this.mirrorIn.checked,
       floor: this.floor,
+      fPx: this.fPx * scale,
     };
   }
 
@@ -472,9 +587,10 @@ export class ExistingImport {
 
   private updatePreview() {
     if (!this.small) return;
-    const flat = flattenTattoo(this.small.img, { ...this.params(this.small.s), maxSide: 700 });
+    const flat = flattenTattoo(this.masked?.small ?? this.small.img, { ...this.params(this.small.s), maxSide: 700 });
     this.lastFlat = flat;
     if (this.floor === undefined) this.cleanIn.value = String(Math.round(((flat.floor - 0.03) / 0.42) * 100));
+    this.updateWidthTip();
     this.drawPreview();
   }
 
@@ -509,7 +625,7 @@ export class ExistingImport {
     this.setStatus('Flattening…');
     await new Promise((r) => setTimeout(r, 20));
     try {
-      const flat = flattenTattoo(this.photo, this.params(1));
+      const flat = flattenTattoo(this.masked?.full ?? this.photo, this.params(1));
       if (flat.empty) { this.setStatus('No ink found inside the guides. Move them around the tattoo or lower "Remove skin texture".'); return; }
       const typed = Number(this.widthIn.value);
       const res: ImportResult = {
@@ -518,8 +634,10 @@ export class ExistingImport {
         kind: this.kind,
         flattened: flat,
         widthCm: typed > 0 ? typed : null,
-        estimateCm: this.analysis?.widthCm ?? null,
+        estimateCm: this.analysis?.pxPerCm ? flat.widthPhotoPx / this.analysis.pxPerCm : this.analysis?.widthCm ?? null,
         regionId: this.regionSel.value,
+        suggestedRegionId: this.analysis?.regionId,
+        mirrored: this.mirrorIn.checked,
         place: this.analysis?.place,
         rotation: this.analysis?.rotation ?? 0,
       };

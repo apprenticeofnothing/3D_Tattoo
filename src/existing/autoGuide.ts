@@ -7,7 +7,7 @@
 //   outline edges across the tattoo,
 // - a quadrilateral around the tattoo for flat areas.
 
-import { linearToSrgbByte, makeImage, SRGB_TO_LINEAR, type Rgba } from './image';
+import { crop, linearToSrgbByte, makeImage, SRGB_TO_LINEAR, type Rgba } from './image';
 import { extractInk } from './inkExtract';
 import type { LimbGuide, Pt } from './unwrap';
 
@@ -18,6 +18,8 @@ export interface Guides {
   limbLike: boolean;
   /** Tattoo bounding box (photo pixels), if found. */
   ink: { x0: number; y0: number; x1: number; y1: number } | null;
+  /** Where the body is (generously), covering the whole photo: outside it nothing counts as ink. */
+  body?: { data: Uint8Array; width: number; height: number };
 }
 
 interface Small { w: number; h: number; s: number; lin: Float32Array }
@@ -62,11 +64,59 @@ const lumOf = (lin: Float32Array, o: number) => 0.2126 * lin[o * 3] + 0.7152 * l
  * @param personMask optional per-pixel person probability (0..1) at `maskW` x `maskH`,
  *   covering the whole photo (e.g. from a pose model).
  */
-export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: number; height: number }): Guides {
+export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: number; height: number }, focus?: Pt): Guides {
+  // A tap on a small tattoo in a wide photo: look closely in a window around it.
+  const win = Math.round(Math.max(320, 0.4 * Math.max(img.width, img.height)));
+  if (focus && win < Math.max(img.width, img.height) * 0.9) {
+    const x0 = Math.round(Math.max(0, Math.min(img.width - win, focus.x - win / 2)));
+    const y0 = Math.round(Math.max(0, Math.min(img.height - win, focus.y - win / 2)));
+    const cw = Math.min(win, img.width), ch = Math.min(win, img.height);
+    const sub = crop(img, x0, y0, cw, ch);
+    let subMask: typeof personMask;
+    if (personMask) {
+      const sx = personMask.width / img.width, sy = personMask.height / img.height;
+      const mw = Math.max(1, Math.round(cw * sx)), mh = Math.max(1, Math.round(ch * sy));
+      const d = new Float32Array(mw * mh);
+      for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) {
+        const mx = Math.min(personMask.width - 1, Math.floor(x0 * sx) + x), my = Math.min(personMask.height - 1, Math.floor(y0 * sy) + y);
+        d[y * mw + x] = personMask.data[my * personMask.width + mx];
+      }
+      subMask = { data: d, width: mw, height: mh };
+    }
+    const g = guidesIn(sub, subMask, { x: focus.x - x0, y: focus.y - y0 });
+    const mv = (p: Pt): Pt => ({ x: p.x + x0, y: p.y + y0 });
+    // The body mask only covers the window: outside it, keep everything.
+    let body: Guides['body'];
+    if (g.body) {
+      const bw = Math.min(1024, img.width), bh = Math.max(1, Math.round((img.height * bw) / img.width));
+      const d = new Uint8Array(bw * bh).fill(1);
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        const px = ((x + 0.5) / bw) * img.width - x0, py = ((y + 0.5) / bh) * img.height - y0;
+        if (px < 0 || py < 0 || px >= cw || py >= ch) continue;
+        d[y * bw + x] = g.body.data[Math.min(g.body.height - 1, Math.floor((py / ch) * g.body.height)) * g.body.width + Math.min(g.body.width - 1, Math.floor((px / cw) * g.body.width))];
+      }
+      body = { data: d, width: bw, height: bh };
+    }
+    return {
+      limb: { p0: mv(g.limb.p0), p1: mv(g.limb.p1), q0: mv(g.limb.q0), q1: mv(g.limb.q1), from: g.limb.from, to: g.limb.to },
+      quad: g.quad.map(mv) as [Pt, Pt, Pt, Pt],
+      limbLike: g.limbLike,
+      ink: g.ink ? { x0: g.ink.x0 + x0, y0: g.ink.y0 + y0, x1: g.ink.x1 + x0, y1: g.ink.y1 + y0 } : null,
+      body,
+    };
+  }
+  return guidesIn(img, personMask, focus);
+}
+
+function guidesIn(img: Rgba, personMask?: { data: Float32Array; width: number; height: number }, focus?: Pt): Guides {
   const sm = downscale(img);
   const { w, h, lin } = sm;
+  // Where to look: a point the person tapped on the tattoo, or the middle of the photo.
+  const fx = focus ? Math.max(0, Math.min(w - 1, focus.x * sm.s)) : w / 2, fy = focus ? Math.max(0, Math.min(h - 1, focus.y * sm.s)) : h / 2;
+  const reach = focus ? 0.08 : 0.15;
   // Skin reference: brighter half of the central window (ink is darker).
-  const cx0 = Math.floor(w * 0.3), cx1 = Math.ceil(w * 0.7), cy0 = Math.floor(h * 0.3), cy1 = Math.ceil(h * 0.7);
+  const half = focus ? 0.1 : 0.2;
+  const cx0 = Math.max(0, Math.floor(fx - w * half)), cx1 = Math.min(w, Math.ceil(fx + w * half)), cy0 = Math.max(0, Math.floor(fy - h * half)), cy1 = Math.min(h, Math.ceil(fy + h * half));
   const centre: number[] = [];
   for (let y = cy0; y < cy1; y++) for (let x = cx0; x < cx1; x++) centre.push(y * w + x);
   centre.sort((a, b) => lumOf(lin, a) - lumOf(lin, b));
@@ -100,15 +150,17 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
     // window (not just the pixel nearest the centre, which can be skin
     // enclosed by the tattoo's own lines).
     const lab = new Int32Array(w * h).fill(-1);
-    const sizes: number[] = [], central: number[] = [];
+    const sizes: number[] = [], central: number[] = [], near: boolean[] = [];
+    const nx0 = Math.max(0, fx - w * 0.35), nx1 = Math.min(w, fx + w * 0.35), ny0 = Math.max(0, fy - h * 0.35), ny1 = Math.min(h, fy + h * 0.35);
     for (let o0 = 0; o0 < w * h; o0++) {
       if (!grown[o0] || lab[o0] >= 0) continue;
       const id = sizes.length;
       const st = [o0]; lab[o0] = id;
-      let n = 0, c = 0;
+      let n = 0, c = 0, nr = false;
       while (st.length) {
         const o = st.pop()!, x = o % w, y = (o - x) / w;
         n++; if (x >= cx0 && x < cx1 && y >= cy0 && y < cy1) c++;
+        if (x >= nx0 && x < nx1 && y >= ny0 && y < ny1) nr = true;
         for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
           const xx = x + dx, yy = y + dy;
           if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
@@ -116,17 +168,26 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
           if (grown[k] && lab[k] < 0) { lab[k] = id; st.push(k); }
         }
       }
-      sizes.push(n); central.push(c);
+      sizes.push(n); central.push(c); near.push(nr);
     }
-    let pick = -1;
-    for (let i = 0; i < sizes.length; i++) if (pick < 0 || central[i] > central[pick] || (central[i] === central[pick] && sizes[i] > sizes[pick])) pick = i;
-    if (pick >= 0 && central[pick] > 0) {
-      const conn = new Uint8Array(w * h);
-      for (let o = 0; o < w * h; o++) if (lab[o] === pick) conn[o] = 1;
+    // Take every sizeable piece of skin reaching into the middle of the
+    // photo; after filling holes, the piece under the focus is the body
+    // part (skin enclosed by the tattoo's own outline becomes part of it).
+    const conn = new Uint8Array(w * h);
+    let any = false;
+    for (let i = 0; i < sizes.length; i++) if (near[i] && (sizes[i] > w * h * 0.004 || central[i] > 0)) any = true;
+    if (any) {
+      for (let o = 0; o < w * h; o++) { const i = lab[o]; if (i >= 0 && near[i] && (sizes[i] > w * h * 0.004 || central[i] > 0)) conn[o] = 1; }
       region.set(erode(conn, w, h, 2));
     } else region.fill(1);
   }
-  // Fill holes (the tattoo itself): anything not reachable from the border through non-region pixels.
+  // Fill holes (the tattoo itself): anything not reachable from the border
+  // through non-region pixels. Close the region first, so a tattoo that
+  // reaches the limb's outline at a corner still counts as enclosed.
+  const closeR = Math.max(2, Math.round(Math.max(w, h) * 0.01));
+  const sealed = erode(dilate(region, w, h, closeR), w, h, closeR);
+  for (let o = 0; o < w * h; o++) if (region[o]) sealed[o] = 1;
+  region.set(sealed);
   const outside = new Uint8Array(w * h);
   const stack: number[] = [];
   for (let x = 0; x < w; x++) { stack.push(x, (h - 1) * w + x); }
@@ -139,10 +200,31 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
     if (x > 0) stack.push(o - 1); if (x < w - 1) stack.push(o + 1);
     if (y > 0) stack.push(o - w); if (y < h - 1) stack.push(o + w);
   }
+  const all = new Uint8Array(w * h);
+  for (let o = 0; o < w * h; o++) if (!outside[o]) all[o] = 1;
+  // Keep the piece under the focus (or the nearest one).
+  let start = -1, bd = Infinity;
+  for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) {
+    if (!all[y * w + x]) continue;
+    const d = Math.hypot(x - fx, y - fy);
+    if (d < bd) { bd = d; start = y * w + x; }
+  }
   const filled = new Uint8Array(w * h);
   let nFilled = 0;
-  for (let o = 0; o < w * h; o++) if (!outside[o]) { filled[o] = 1; nFilled++; }
+  if (start >= 0) {
+    const st = [start]; filled[start] = 1;
+    while (st.length) {
+      const o = st.pop()!, x = o % w, y = (o - x) / w; nFilled++;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const k = yy * w + xx;
+        if (all[k] && !filled[k]) { filled[k] = 1; st.push(k); }
+      }
+    }
+  }
   if (nFilled < w * h * 0.02) filled.fill(1);
+  for (let o = 0; o < w * h; o++) if (!filled[o]) region[o] = 0;
   // Ink: measured against the local skin colour and lighting (as in the
   // final extraction), inside the region but away from its rim.
   const regionImg = makeImage(w, h);
@@ -187,7 +269,7 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
   // Photos of a tattoo are aimed at it: start from the biggest blob near
   // the centre, then take in blobs whose middle lies close to it (the other
   // strokes of the same tattoo), growing until nothing more joins.
-  const centreScore = (b: (typeof blobs)[number]) => b.n * Math.exp(-((Math.hypot(b.cx - w / 2, b.cy - h / 2) / (0.15 * Math.hypot(w, h))) ** 2));
+  const centreScore = (b: (typeof blobs)[number]) => b.n * Math.exp(-((Math.hypot(b.cx - fx, b.cy - fy) / (reach * Math.hypot(w, h))) ** 2));
   let best = { x0: 0, y0: 0, x1: -1, y1: -1, n: 0 };
   const first = blobs.reduce<(typeof blobs)[number] | null>((a, b) => (!a || centreScore(b) > centreScore(a) ? b : a), null);
   if (first && first.n > 3) {
@@ -205,7 +287,7 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
   }
   const hasInk = best.n > 6;
   const ix0 = best.x0, iy0 = best.y0, ix1 = best.x1, iy1 = best.y1;
-  const ic = hasInk ? { x: (ix0 + ix1) / 2, y: (iy0 + iy1) / 2 } : { x: w / 2, y: h / 2 };
+  const ic = hasInk ? { x: (ix0 + ix1) / 2, y: (iy0 + iy1) / 2 } : { x: fx, y: fy };
   // Limb direction near the tattoo: a limb's outlines and its shading both
   // run along it, so the dominant direction of brightness changes (outside
   // the ink) points across the limb. Structure tensor of log-brightness.
@@ -240,7 +322,14 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
   const padA = (a1 - a0) * 0.12 + 3;
   a0 -= padA; a1 += padA;
   // Limb edges: walk across the region at the two ends of the tattoo.
-  let hitBorder = false;
+  let borderHits = 0;
+  // Cross-sections must start on the limb: step towards the tattoo's middle until they do.
+  const onLimb = (a: number) => {
+    const x = Math.round(ic.x + ax.x * a), y = Math.round(ic.y + ax.y * a);
+    return x >= 0 && y >= 0 && x < w && y < h && !!filled[y * w + x];
+  };
+  for (let k = 0; k < 400 && a0 < 0 && !onLimb(a0); k++) a0 = Math.min(0, a0 + 1);
+  for (let k = 0; k < 400 && a1 > 0 && !onLimb(a1); k++) a1 = Math.max(0, a1 - 1);
   const edgeAt = (a: number): [Pt, Pt] => {
     const base = { x: ic.x + ax.x * a, y: ic.y + ax.y * a };
     const walk = (sgn: number): Pt => {
@@ -252,7 +341,7 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
       for (let t = 0; t < Math.max(w, h); t += 1) {
         const o = at(t);
         const p = { x: base.x + perp.x * t * sgn, y: base.y + perp.y * t * sgn };
-        if (o < 0) { hitBorder = true; return last; }
+        if (o < 0) { borderHits++; return last; }
         if (!filled[o]) return last;
         // A sharp brightness step outside the ink: the limb's outline against
         // whatever is behind it (even other skin in shadow).
@@ -265,7 +354,8 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
     return [walk(-1), walk(1)];
   };
   const [e0a, e0b] = edgeAt(a0), [e1a, e1b] = edgeAt(a1);
-  const limbLike = !hitBorder && Math.hypot(e0b.x - e0a.x, e0b.y - e0a.y) > 4;
+  // Flat (back, chest) when skin runs off the photo on most sides; a limb otherwise.
+  const limbLike = borderHits <= 1 && Math.hypot(e0b.x - e0a.x, e0b.y - e0a.y) > 4;
   const k = 1 / sm.s;
   const P = (p: Pt): Pt => ({ x: p.x * k, y: p.y * k });
   return {
@@ -274,6 +364,7 @@ export function autoGuides(img: Rgba, personMask?: { data: Float32Array; width: 
     quad: flatQuad(hasInk ? { x0: ix0 * k, y0: iy0 * k, x1: (ix1 + 1) * k, y1: (iy1 + 1) * k } : { x0: img.width * 0.3, y0: img.height * 0.3, x1: img.width * 0.7, y1: img.height * 0.7 }, img),
     limbLike,
     ink: hasInk ? { x0: ix0 * k, y0: iy0 * k, x1: (ix1 + 1) * k, y1: (iy1 + 1) * k } : null,
+    body: { data: dilate(filled, w, h, Math.max(3, Math.round(Math.max(w, h) * 0.03))), width: w, height: h },
   };
 }
 
@@ -303,5 +394,18 @@ function erode(m: Uint8Array, w: number, h: number, r: number): Uint8Array {
   for (let i = 0; i < w * h; i++) out[i] = d[i] ? 0 : 1;
   // Pixels at the image border stay as they were (no outside neighbours to erode from).
   for (let x = 0; x < w; x++) for (const y of [0, h - 1]) out[y * w + x] = m[y * w + x] && out[y * w + x];
+  return out;
+}
+
+/** A copy of the photo with everything outside the body made transparent (so it never counts as ink). */
+export function maskOutside(img: Rgba, body: NonNullable<Guides['body']>): Rgba {
+  const out = { width: img.width, height: img.height, data: new Uint8ClampedArray(img.data) };
+  for (let y = 0; y < img.height; y++) {
+    const my = Math.min(body.height - 1, Math.floor(((y + 0.5) / img.height) * body.height));
+    for (let x = 0; x < img.width; x++) {
+      const mx = Math.min(body.width - 1, Math.floor(((x + 0.5) / img.width) * body.width));
+      if (!body.data[my * body.width + mx]) out.data[(y * img.width + x) * 4 + 3] = 0;
+    }
+  }
   return out;
 }

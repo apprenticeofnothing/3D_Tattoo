@@ -16,3 +16,6 @@
 # Build output and dependencies
 node_modules/
 dist/
+
+# Pose model and runtime, fetched by scripts/fetch-models.mjs
+/public/mediapipe/

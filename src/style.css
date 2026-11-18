@@ -164,6 +164,7 @@ input[type=range] { width: 140px; min-height: var(--tap); accent-color: var(--ac
 .ex-side select { flex: 1 1 200px; }
 .ex-side input[type=number] { width: 110px; }
 .ex-side input[type=range] { flex: 1; }
+.ex-closeup p { margin: 0 0 8px; font-size: 14px; line-height: 1.4; }
 .ex-tip, .ex-hint, .ex-width-tip { margin: 0; font-size: 14px; line-height: 1.4; }
 .ex-tip { color: var(--muted); }
 .ex-hint { color: #9ee6b0; }

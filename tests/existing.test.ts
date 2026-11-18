@@ -204,3 +204,77 @@ describe('automatic guides', () => {
     expect(Math.hypot(cx - W / 2, cy - H / 2)).toBeLessThan(10);
   });
 });
+
+describe('limb unwrap with perspective', () => {
+  // A vertical cylinder (radius 1) 6 radii from a pinhole camera with an
+  // 800 px focal length, stripes every 0.2 radii of skin. A close phone
+  // photo of a forearm is like this (4 cm radius seen from 24 cm).
+  const W = 400, H = 200, F = 800, D = 6, Rc = 1, cx = 200;
+  const img = makeImage(W, H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let cover = 0, hit = 0;
+    for (let k = 0; k < 8; k++) {
+      const a = (x + (k + 0.5) / 8 - cx) / F; // ray x = a z
+      const A = a * a + 1, disc = D * D - A * (D * D - Rc * Rc);
+      if (disc < 0) continue;
+      hit++;
+      const z = (D - Math.sqrt(disc)) / A;
+      const th = Math.atan2(a * z, D - z);
+      if (((Rc * th) / 0.2 + 1000) % 1 < 0.2) cover++;
+    }
+    const o = (y * W + x) * 4;
+    img.data[o + 3] = 255;
+    if (!hit) { img.data[o] = img.data[o + 1] = img.data[o + 2] = 25; continue; }
+    const t = 1 - 0.88 * (cover / 8);
+    for (let c = 0; c < 3; c++) img.data[o + c] = linearToSrgbByte(SKIN[c] * t);
+  }
+  const hw = F * Math.tan(Math.asin(Rc / D)); // apparent half-width of the outline
+  const guide = { p0: { x: cx - hw, y: 10 }, p1: { x: cx - hw, y: 190 }, q0: { x: cx + hw, y: 10 }, q1: { x: cx + hw, y: 190 } };
+  const stripes = (res: ReturnType<typeof unwrapLimb>) => {
+    const ink = extractInk(res.image, { floor: 0.3 });
+    const y = Math.floor(ink.image.height / 2), out: number[] = [];
+    let sw = 0, sx = 0;
+    for (let x = 0; x <= ink.image.width; x++) {
+      const a = x < ink.image.width ? alphaAt(ink.image, x, y) : 0;
+      if (a > 0.05) { sw += a; sx += a * (x + 0.5); } else if (sw > 0) { if (sw > 1) out.push(sx / sw); sw = 0; sx = 0; }
+    }
+    const mid = ink.image.width / 2;
+    return out.filter((c) => Math.abs(c - mid) < 0.75 * mid).slice(1, -1);
+  };
+
+  it('spaces the stripes evenly and sizes them by the front of the limb', () => {
+    const res = unwrapLimb(img, guide, { fPx: F, scale: 1 });
+    expect(res.radiusPx).toBeCloseTo(F / (D / Rc - 1), 3); // 160 px
+    const c = stripes(res);
+    expect(c.length).toBeGreaterThan(5);
+    const gaps = c.slice(1).map((v, i) => v - c[i]);
+    const expected = 0.2 * res.radiusPx; // 0.2 radii in front pixels
+    for (const g of gaps) expect(Math.abs(g - expected) / expected).toBeLessThan(0.04);
+  });
+
+  it('would be about 15% off without perspective (why the focal length matters)', () => {
+    const res = unwrapLimb(img, guide, { scale: 1 });
+    const c = stripes(res);
+    const gaps = c.slice(1).map((v, i) => v - c[i]);
+    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    // Read with the outline as the scale, the stripes come out too far apart in real units.
+    const apparent = (mean / res.radiusPx) * Rc; // radii per stripe as the orthographic model reads it
+    expect(apparent / 0.2).toBeGreaterThan(1.1);
+  });
+});
+
+describe('EXIF focal length', () => {
+  it('reads FocalLengthIn35mmFilm from a minimal JPEG', async () => {
+    const { focal35FromJpeg, focalPx } = await import('../src/existing/exif');
+    // SOI, APP1 "Exif\\0\\0", little-endian TIFF: IFD0 with an Exif pointer, Exif IFD with 0xA405 = 26.
+    const tiff: number[] = [];
+    const u16 = (v: number) => tiff.push(v & 255, v >> 8), u32 = (v: number) => { u16(v & 0xffff); u16(v >>> 16); };
+    tiff.push(0x49, 0x49); u16(42); u32(8);
+    u16(1); u16(0x8769); u16(4); u32(1); u32(26); u32(0); // IFD0 at 8: one entry, next IFD 0 -> Exif IFD at 26
+    u16(1); u16(0xa405); u16(3); u32(1); u16(26); u16(0); u32(0);
+    const app1 = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
+    const bytes = [0xff, 0xd8, 0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 255, ...app1, 0xff, 0xda, 0, 2];
+    expect(focal35FromJpeg(new Uint8Array(bytes).buffer)).toBe(26);
+    expect(focalPx(26, 4032, 3024)).toBeCloseTo((26 / 43.27) * 5040, 0);
+  });
+});
