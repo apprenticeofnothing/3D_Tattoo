@@ -9,14 +9,27 @@ page.on('pageerror', (e) => logs.push(`pageerror: ${e.message}`));
 page.on('console', (m) => { if (m.type() === 'error') logs.push(`error: ${m.text()}`); });
 await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
 await page.waitForFunction(() => !document.getElementById('status').textContent.includes('Building'), null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__app?.surfaceInfo?.() !== null, null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.closeBodyPanel?.());
 await page.evaluate(() => localStorage.clear());
 await page.waitForTimeout(800);
 const stage = await page.locator('#stage').boundingBox();
 const cx = stage.x + stage.width / 2, cy = stage.y + stage.height / 2;
 await page.evaluate(() => window.__app.goTo('forearm-outer-left')); await page.waitForTimeout(900);
 await page.click('#btn-measure'); await page.waitForTimeout(200);
-await page.mouse.click(cx, cy - 60); await page.waitForTimeout(300);
-await page.mouse.click(cx + 10, cy + 90); await page.waitForTimeout(800);
+// Second tap: the farthest of a ring of candidate points (up to 120 px away) that still lands on the body.
+const second = await page.evaluate(([x, y]) => {
+  let best = null;
+  for (let r = 120; r >= 40 && !best; r -= 20) {
+    for (let a = 0; a < 16; a++) {
+      const px = x + r * Math.cos((a / 16) * 2 * Math.PI), py = y + r * Math.sin((a / 16) * 2 * Math.PI);
+      if (window.__app.pickSurface(px, py)) { best = { x: px, y: py }; break; }
+    }
+  }
+  return best;
+}, [cx, cy]);
+await page.mouse.click(cx, cy); await page.waitForTimeout(300);
+await page.mouse.click(second.x, second.y); await page.waitForTimeout(800);
 logs.push(`distance: ${await page.evaluate(() => window.__app.measureText())}`);
 await page.screenshot({ path: `${out}/m-1-distance.png` });
 await page.click('.seg-btn[data-measure="around"]'); await page.waitForTimeout(200);

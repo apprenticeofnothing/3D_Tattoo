@@ -176,3 +176,19 @@ describe('section loop', () => {
     expect(Math.abs(sec.length / (2 * Math.PI * R) - 1)).toBeLessThan(0.001);
   });
 });
+
+describe('section loop through a vertex', () => {
+  it('still closes when the point is exactly a mesh vertex', () => {
+    const R = 0.05;
+    const m = cylinderMesh(R, 0.6, 160, 96);
+    const w = weld(m.positions, m.indices);
+    const mesh = surfaceFromIndexed({ positions: w.positions, indices: w.indices });
+    for (const t of [100, 2000, 7000]) {
+      const v = mesh.indices[t * 3] * 3;
+      const p: [number, number, number] = [mesh.positions[v], mesh.positions[v + 1], mesh.positions[v + 2]];
+      const sec = sectionLoop(mesh, t, p, [0, 1, 0]);
+      expect(sec.closed).toBe(true);
+      expect(Math.abs(sec.length / (2 * Math.PI * R) - 1)).toBeLessThan(0.002);
+    }
+  });
+});

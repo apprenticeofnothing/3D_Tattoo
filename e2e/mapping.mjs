@@ -11,6 +11,8 @@ async function run(name, ctxOpts) {
   page.on('pageerror', (e) => logs.push(`[${name}] pageerror: ${e.message}`));
   await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
   await page.waitForFunction(() => !document.getElementById('status').textContent.includes('Building'), null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__app?.surfaceInfo?.() !== null, null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.closeBodyPanel?.());
   await page.waitForTimeout(1000);
   const vp = page.viewportSize();
   const stage = await page.locator('#stage').boundingBox();

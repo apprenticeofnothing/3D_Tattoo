@@ -21,6 +21,11 @@ export interface SurfaceMesh {
   sources: { mesh: Mesh; triStart: number; triCount: number }[];
   /** Original (pre-weld) triangle index -> surface triangle index, or -1 if it collapsed. */
   triRemap: Int32Array | null;
+  /** Optional body-part label per vertex (from a body with a skeleton, e.g. the body builder). */
+  labels?: Uint8Array;
+  partNames?: string[];
+  /** Identifier of the mesh connectivity, when the body comes from a known family. */
+  topology?: string;
 }
 
 /** Build a SurfaceMesh from an IndexedMesh already in world space. */
@@ -35,6 +40,9 @@ export function surfaceFromObject(root: Object3D): SurfaceMesh {
   root.traverse((o) => { if ((o as Mesh).isMesh) meshes.push(o as Mesh); });
   const posChunks: Float32Array[] = [];
   const idxChunks: Uint32Array[] = [];
+  const labelChunks: (Uint8Array | null)[] = [];
+  let partNames: string[] | undefined;
+  let topology: string | undefined;
   const sources: SurfaceMesh['sources'] = [];
   let vertBase = 0, triBase = 0;
   const v = new Vector3();
@@ -58,13 +66,29 @@ export function surfaceFromObject(root: Object3D): SurfaceMesh {
       for (let i = 0; i < n; i++) idx[i] = i + vertBase;
     }
     posChunks.push(out); idxChunks.push(idx);
+    const ud = mesh.userData as { partLabels?: Uint8Array; partNames?: string[]; topology?: string };
+    labelChunks.push(ud.partLabels && ud.partLabels.length === n ? ud.partLabels : null);
+    if (ud.partNames) partNames = ud.partNames;
+    if (ud.topology && meshes.length === 1) topology = ud.topology;
     sources.push({ mesh, triStart: triBase, triCount: idx.length / 3 });
     vertBase += n; triBase += idx.length / 3;
   }
   const positions = concat(posChunks, Float32Array);
   const indices = concat(idxChunks, Uint32Array);
   const welded = weld(positions, indices);
-  return finish(welded.positions, welded.indices, sources, welded.triRemap);
+  const surface = finish(welded.positions, welded.indices, sources, welded.triRemap);
+  if (partNames && labelChunks.some(Boolean)) {
+    const labels = new Uint8Array(welded.positions.length / 3).fill(255);
+    let o = 0;
+    for (const chunk of labelChunks) {
+      const n = chunk ? chunk.length : 0;
+      if (chunk) for (let i = 0; i < n; i++) { const w = welded.remap[o + i]; if (labels[w] === 255) labels[w] = chunk[i]; }
+      o += chunk ? n : 0;
+    }
+    surface.labels = labels; surface.partNames = partNames;
+  }
+  surface.topology = topology;
+  return surface;
 }
 
 function concat<T extends Float32Array | Uint32Array>(chunks: T[], Ctor: { new (n: number): T }): T {

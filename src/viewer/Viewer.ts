@@ -26,6 +26,8 @@ export class Viewer {
   private fly: { from: FlyTarget; to: FlyTarget; start: number; duration: number } | null = null;
   private readonly floor: GridHelper;
   private width = 1; private height = 1;
+  /** Screen space covered by side or bottom panels; the view is centred in what remains. */
+  private inset = { right: 0, bottom: 0 };
   private hemi!: HemisphereLight; private key!: DirectionalLight; private fill!: DirectionalLight; private ambient!: AmbientLight;
 
   /**
@@ -49,7 +51,7 @@ export class Viewer {
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new Color(0x1b1d22);
-    this.camera = new PerspectiveCamera(38, 1, 0.02, 50);
+    this.camera = new PerspectiveCamera(38, 1, 0.02, 80);
     this.camera.position.set(0, 1.1, 3.2);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -57,7 +59,7 @@ export class Viewer {
     this.controls.dampingFactor = 0.12;
     this.controls.screenSpacePanning = true;
     this.controls.minDistance = 0.15;
-    this.controls.maxDistance = 8;
+    this.controls.maxDistance = 25;
     this.controls.target.set(0, 1.0, 0);
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
@@ -108,7 +110,11 @@ export class Viewer {
   /** Front view of the whole body of the given height. */
   frameBody(height: number): void {
     const target = new Vector3(0, height * 0.5, 0);
-    const dist = (height * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360);
+    // With a bottom panel the vertical field of view is spread over a taller
+    // virtual frame; back off so the whole body fits in the uncovered part.
+    const b = this.compareFilter ? 0 : this.inset.bottom;
+    const vFactor = (this.height + b) / Math.max(1, this.height - b);
+    const dist = ((height * 0.62) / Math.tan((this.camera.fov * Math.PI) / 360)) * vFactor;
     const aspect = this.viewAspect();
     const aspectFix = aspect < 0.75 ? 1 / aspect * 0.75 : 1;
     this.flyTo({ target, position: new Vector3(0, height * 0.52, dist * aspectFix) });
@@ -116,9 +122,15 @@ export class Viewer {
 
   requestRender(): void { this.needsRender = true; }
 
+  /** Keep the scene centred in the part of the canvas not covered by a panel. */
+  setInsets(inset: { right?: number; bottom?: number }): void {
+    this.inset = { right: Math.max(0, inset.right ?? 0), bottom: Math.max(0, inset.bottom ?? 0) };
+    this.needsRender = true;
+  }
+
   /** Aspect ratio of one viewport. */
   viewAspect(): number {
-    if (!this.compareFilter) return this.width / this.height;
+    if (!this.compareFilter) return Math.max(1, this.width - this.inset.right) / Math.max(1, this.height - this.inset.bottom);
     return this.compareStacked ? this.width / (this.height / 2) : (this.width / 2) / this.height;
   }
 
@@ -147,11 +159,21 @@ export class Viewer {
     if (!this.compareFilter) {
       r.setScissorTest(false);
       r.setViewport(0, 0, W, H);
-      this.camera.aspect = this.width / this.height;
+      const { right, bottom } = this.inset;
+      if (right > 0 || bottom > 0) {
+        // A larger virtual frame whose centre is the centre of the uncovered area.
+        const fw = this.width + right, fh = this.height + bottom;
+        this.camera.aspect = fw / fh;
+        this.camera.setViewOffset(fw, fh, right, bottom, this.width, this.height);
+      } else {
+        this.camera.clearViewOffset();
+        this.camera.aspect = this.width / this.height;
+      }
       this.camera.updateProjectionMatrix();
       r.render(this.scene, this.camera);
       return;
     }
+    this.camera.clearViewOffset();
     r.setScissorTest(true);
     const rects: Record<CompareSide, Vector4> = this.compareStacked
       ? { left: new Vector4(0, Math.ceil(H / 2), W, Math.floor(H / 2)), right: new Vector4(0, 0, W, Math.floor(H / 2)) }

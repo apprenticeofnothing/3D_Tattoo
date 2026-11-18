@@ -62,11 +62,125 @@ export interface RegionPose {
   position: Vector3;
 }
 
+export interface PartLabels { labels: Uint8Array; names: string[] }
+
+/** Labelled parts used for each region (bodies with a skeleton). Fractions run from the joint nearer the trunk. */
+const LABELLED: Record<string, { parts: string[]; from?: number; to?: number; also?: { parts: string[]; from?: number; to?: number } }> = {
+  'head-front': { parts: ['head'] }, 'head-back': { parts: ['head'] },
+  'neck-front': { parts: ['neck'] }, 'neck-back': { parts: ['neck'] },
+  shoulder: { parts: ['upperarm', 'shoulder'], from: 0, to: 0.3 },
+  'upper-arm-outer': { parts: ['upperarm'], from: 0.25, to: 1 }, 'upper-arm-inner': { parts: ['upperarm'], from: 0.25, to: 1 },
+  'forearm-outer': { parts: ['forearm'] }, 'forearm-inner': { parts: ['forearm'] },
+  hand: { parts: ['hand'] },
+  'thigh-front': { parts: ['thigh'], from: 0.1, to: 0.9 }, 'thigh-back': { parts: ['thigh'], from: 0.1, to: 0.9 }, 'thigh-outer': { parts: ['thigh'], from: 0.1, to: 0.9 },
+  knee: { parts: ['thigh'], from: 0.85, to: 1, also: { parts: ['shin'], from: 0, to: 0.12 } },
+  shin: { parts: ['shin'], from: 0.1, to: 0.9 }, calf: { parts: ['shin'], from: 0.1, to: 0.9 },
+  foot: { parts: ['foot'] },
+};
+
+function baseId(def: RegionDef): string { return def.id.replace(/-(left|right)$/, ''); }
+
+/** Vertex ids carrying any of the given part names on the region's side, limited to a fraction along the limb. */
+function labelledVertices(positions: Float32Array, lab: PartLabels, parts: string[], side: Side, from = 0, to = 1): number[] {
+  const suffix = side === 'left' ? '.L' : side === 'right' ? '.R' : '';
+  const ids = new Set<number>();
+  parts.forEach((p) => {
+    const i1 = lab.names.indexOf(p + suffix), i2 = lab.names.indexOf(p);
+    if (i1 >= 0) ids.add(i1);
+    if (i2 >= 0 && !suffix) ids.add(i2);
+  });
+  const sel: number[] = [];
+  for (let v = 0; v < lab.labels.length; v++) if (ids.has(lab.labels[v])) sel.push(v);
+  if (sel.length === 0 || (from <= 0 && to >= 1)) return sel;
+  // Principal axis of the selection; the proximal end is the one nearer the body's centre line.
+  const ax = limbAxis(positions, sel);
+  const proj = sel.map((v) => (positions[v * 3] - ax.c[0]) * ax.d[0] + (positions[v * 3 + 1] - ax.c[1]) * ax.d[1] + (positions[v * 3 + 2] - ax.c[2]) * ax.d[2]);
+  let lo = Infinity, hi = -Infinity;
+  for (const t of proj) { lo = Math.min(lo, t); hi = Math.max(hi, t); }
+  // Which end is proximal: farther from the centre line x = 0 is distal for arms; higher is proximal for legs.
+  const endA = [ax.c[0] + ax.d[0] * lo, ax.c[1] + ax.d[1] * lo, ax.c[2] + ax.d[2] * lo];
+  const endB = [ax.c[0] + ax.d[0] * hi, ax.c[1] + ax.d[1] * hi, ax.c[2] + ax.d[2] * hi];
+  const proxIsLo = Math.abs(endA[0]) - endA[1] * 0.5 < Math.abs(endB[0]) - endB[1] * 0.5;
+  const out: number[] = [];
+  sel.forEach((v, i) => {
+    let f = (proj[i] - lo) / (hi - lo || 1);
+    if (!proxIsLo) f = 1 - f;
+    if (f >= from && f <= to) out.push(v);
+  });
+  return out;
+}
+
+function limbAxis(positions: Float32Array, sel: number[]): { c: [number, number, number]; d: [number, number, number] } {
+  let cx = 0, cy = 0, cz = 0;
+  for (const v of sel) { cx += positions[v * 3]; cy += positions[v * 3 + 1]; cz += positions[v * 3 + 2]; }
+  cx /= sel.length; cy /= sel.length; cz /= sel.length;
+  let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+  for (const v of sel) {
+    const dx = positions[v * 3] - cx, dy = positions[v * 3 + 1] - cy, dz = positions[v * 3 + 2] - cz;
+    xx += dx * dx; xy += dx * dy; xz += dx * dz; yy += dy * dy; yz += dy * dz; zz += dz * dz;
+  }
+  let ax = 0.3, ay = 1, az = 0.2;
+  for (let it = 0; it < 60; it++) {
+    const nx = xx * ax + xy * ay + xz * az, ny = xy * ax + yy * ay + yz * az, nz = xz * ax + yz * ay + zz * az;
+    const l = Math.hypot(nx, ny, nz) || 1; ax = nx / l; ay = ny / l; az = nz / l;
+  }
+  return { c: [cx, cy, cz], d: [ax, ay, az] };
+}
+
+function poseFrom(positions: Float32Array, sel: number[], dir: Vector3, def: RegionDef, height: number): RegionPose | null {
+  if (sel.length === 0) return null;
+  const c = new Vector3();
+  for (const i of sel) c.add(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
+  c.multiplyScalar(1 / sel.length);
+  const facing = sel.filter((i) => (positions[i * 3] - c.x) * dir.x + (positions[i * 3 + 1] - c.y) * dir.y + (positions[i * 3 + 2] - c.z) * dir.z > 0);
+  const use = facing.length > 10 ? facing : sel;
+  // Keep the half most toward the viewer so the target sits on the skin.
+  const scored = use.map((i) => ({ i, s: positions[i * 3] * dir.x + positions[i * 3 + 1] * dir.y + positions[i * 3 + 2] * dir.z })).sort((a, b) => b.s - a.s);
+  const top = scored.slice(0, Math.max(5, Math.ceil(scored.length * 0.5)));
+  const target = new Vector3();
+  for (const { i } of top) target.add(new Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
+  target.multiplyScalar(1 / top.length);
+  const dist = def.part === 'torso' ? 1.3 : def.part === 'head' ? 0.9 : def.part === 'arm' ? 0.95 : 1.1;
+  return { target, position: target.clone().addScaledVector(dir, dist * (height / 1.8)) };
+}
+
+function locateLabelled(def: RegionDef, positions: Float32Array, height: number, lab: PartLabels): RegionPose | null {
+  const spec = LABELLED[baseId(def)];
+  let dir = viewDirection(def);
+  if (!spec) {
+    // Torso regions: torso label within the height band.
+    const torso = labelledVertices(positions, lab, ['torso'], 'center');
+    const yMin = def.yMin * height, yMax = def.yMax * height;
+    const sel = torso.filter((v) => {
+      const x = positions[v * 3], y = positions[v * 3 + 1];
+      if (y < yMin || y > yMax) return false;
+      if (def.side === 'left' && x <= 0) return false;
+      if (def.side === 'right' && x >= 0) return false;
+      return true;
+    });
+    return poseFrom(positions, sel, dir, def, height);
+  }
+  let sel = labelledVertices(positions, lab, spec.parts, def.side, spec.from, spec.to);
+  if (spec.also) sel = sel.concat(labelledVertices(positions, lab, spec.also.parts, def.side, spec.also.from, spec.also.to));
+  if (sel.length === 0) return null;
+  if (def.part === 'arm' || def.part === 'leg') {
+    // View perpendicular to the limb so "outer"/"front" mean the same on a raised or hanging limb.
+    const { d } = limbAxis(positions, sel);
+    const a = new Vector3(...d);
+    const perp = dir.clone().addScaledVector(a, -dir.dot(a));
+    if (perp.lengthSq() > 1e-6) dir = perp.normalize();
+  }
+  return poseFrom(positions, sel, dir, def, height);
+}
+
 /**
  * Find a region on a body given its world-space vertex positions (Y up,
- * feet at 0) and total height. Returns null when no vertices match.
+ * feet at 0) and total height. Uses body-part labels when the body has
+ * them (body builder), otherwise a height-band heuristic. Returns null
+ * when no vertices match.
  */
-export function locateRegion(def: RegionDef, positions: Float32Array, height: number): RegionPose | null {
+export function locateRegion(def: RegionDef, positions: Float32Array, height: number, labels?: PartLabels): RegionPose | null {
+  if (labels) return locateLabelled(def, positions, height, labels);
   const yMin = def.yMin * height, yMax = def.yMax * height;
   // Pass 1: band extents.
   let maxAbsX = 0, count = 0;

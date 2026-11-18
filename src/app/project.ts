@@ -28,13 +28,24 @@ export interface PlacementData {
   option: Option;
   /** Temporarily hidden (still saved). */
   hidden?: boolean;
+  /** Barycentric position of the anchor in its triangle. With an unchanged mesh
+   *  connectivity (the body builder) this pins the design to the same spot on
+   *  the skin whatever the body shape. */
+  bary?: [number, number, number];
 }
 
 export interface ProjectData {
   version: 1;
   savedAt: string;
   heightCm: number;
-  body: { label: string; triangles: number };
+  body: {
+    label: string;
+    triangles: number;
+    /** Mesh connectivity family; equal topology means triangle ids and barycentric anchors carry over. */
+    topology?: string;
+    /** Body builder settings, when the body was built with sliders. */
+    builder?: { params: import('../body/builder').BodyParams; appearance: import('../body/builder').Appearance; presetId: string | null };
+  };
   designs: DesignSource[];
   placements: PlacementData[];
   selectedId: string | null;
@@ -68,6 +79,11 @@ export class History {
     return JSON.parse(this.stack[this.index]);
   }
   current(): PlacementData[] | null { return this.index >= 0 ? JSON.parse(this.stack[this.index]) : null; }
+  /** Overwrite the current state without adding an undo step (e.g. after a body change moved the anchors). */
+  replaceCurrent(placements: PlacementData[]): void {
+    if (this.index < 0) { this.push(placements); return; }
+    this.stack[this.index] = JSON.stringify(placements);
+  }
 }
 
 export function newId(prefix: string): string {

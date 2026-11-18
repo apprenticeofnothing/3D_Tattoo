@@ -52,6 +52,11 @@ both devices are on the same Wi-Fi.
   around Apple's photogrammetry engine (not compiled here); Blender mesh
   prep script in `tools/mesh-prep`; orientation controls for loaded scans.
   Walkthrough in `docs/pipeline.md`.
+- Body builder: six realistic preset bodies (female and male; thin,
+  athletic, slightly overweight) built from MakeHuman data, shaped further
+  with sliders for weight, muscle, torso, arms and legs, plus skin tone.
+  Designs stay on the same spot of skin while the body changes. See
+  `docs/body-builder.md`.
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

@@ -15,7 +15,9 @@ import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/me
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
 import { History, newId, type PlacementData, type ProjectData } from './app/project';
-import { PlacedDesign, nearestTriangle, type Placement } from './mapping/placements';
+import { PlacedDesign, nearestTriangle, pointFromBary, type Placement } from './mapping/placements';
+import { BuilderBody, defaultParams, loadBodyData, presetParamsAtHeight, SKIN_TONES, type Appearance, type BodyData, type BodyParams, type PresetMeta } from './body/builder';
+import { BodyPanel } from './ui/bodyPanel';
 
 const HEIGHT_KEY = 'tattoo.heightCm';
 const PROJECT_KEY = 'tattoo.project.v1';
@@ -55,6 +57,20 @@ let scanInfo = { triangles: 0, textured: false };
 let orient: { up: UpAxis; turn: number } = { up: 'y', turn: 0 };
 let orientManual = false;
 let lighting: 'studio' | 'flat' | 'auto' = (localStorage.getItem('tattoo.lighting') as 'studio' | 'flat' | 'auto') || 'auto';
+// Body builder (MakeHuman-derived bodies shaped with sliders).
+type BodySource = 'builder' | 'scan' | 'mannequin';
+const BUILDER_KEY = 'tattoo.builder.v1';
+interface BuilderState { params: BodyParams; appearance: Appearance; presetId: string | null; base?: BodyParams | null }
+let bodySource: BodySource = 'builder';
+let bodyData: BodyData | null = null;
+let builder: BuilderBody | null = null;
+let builderState: BuilderState | null = null;
+let builderStored = false;
+try {
+  const raw = localStorage.getItem(BUILDER_KEY);
+  if (raw) { builderState = JSON.parse(raw) as BuilderState; builderStored = true; }
+} catch { builderState = null; }
+let bodyPanel: BodyPanel | null = null;
 
 function setStatus(text: string) { status.textContent = text; }
 function bodyStatus() { setStatus(`${bodyLabel} · ${heightCm} cm${bodyInfo}`); }
@@ -67,14 +83,154 @@ function clearPlacements() {
   select(null);
 }
 
-function afterBodyChange() {
+/**
+ * Rebuild the mapping surface after the body changed. Designs carry over:
+ * exactly (same triangle and barycentric spot) when the mesh connectivity is
+ * unchanged, as with the body builder; otherwise re-fitted by location.
+ */
+function afterBodyChange(opts: { frame?: boolean } = {}) {
   const body = viewer.getBody()!;
+  const prev = surface;
+  const carry = !restorePending && placed.length ? projectData() : null;
   surface = surfaceFromObject(body);
   bodyTriangles = surface.indices.length / 3;
+  if (opts.frame !== false) viewer.frameBody(heightM());
+  if (restorePending) { clearPlacements(); const data = restorePending; restorePending = null; void applyProject(data); return; }
+  if (carry && prev && prev.topology && prev.topology === surface.topology && prev.indices.length === surface.indices.length) {
+    for (const d of placed) {
+      const p = d.placement;
+      if (p.bary) p.point = pointFromBary(surface, p.tri, p.bary);
+      d.decal.mesh.visible = !p.hidden;
+      recompute(d, true);
+    }
+    history.replaceCurrent(snapshot());
+    autosave();
+    return;
+  }
   clearPlacements();
-  viewer.frameBody(heightM());
-  if (restorePending) { const data = restorePending; restorePending = null; void applyProject(data); }
+  if (carry) void applyProject(carry);
   else commit();
+}
+
+// ---------- Body builder ----------
+
+function presetById(id: string | null): PresetMeta | undefined { return bodyData?.meta.presets.find((p) => p.id === id); }
+
+function saveBuilderState() {
+  if (!builderState) return;
+  try { localStorage.setItem(BUILDER_KEY, JSON.stringify(builderState)); } catch { /* ignore */ }
+}
+
+function builderLabel(): string {
+  return presetById(builderState?.presetId ?? null)?.name ?? 'Custom body';
+}
+
+function refreshBodyPanel() {
+  if (!bodyPanel || !builderState) return;
+  bodyPanel.update({ source: bodySource, params: builderState.params, appearance: builderState.appearance, presetId: builderState.presetId, base: builderState.base ?? null, heightCm, bmi: builder ? builder.bmi() : null });
+}
+
+/** Show the builder body with the current settings. */
+function showBuilder(opts: { frame?: boolean } = {}) {
+  if (!bodyData || !builderState) { showPlaceholder(); return; }
+  if (!builder) builder = new BuilderBody(bodyData, builderState.params);
+  builder.appearance = builderState.appearance;
+  builder.update(builderState.params, heightM());
+  builder.mesh.updateMatrixWorld(true);
+  scanObject = null;
+  bodySource = 'builder';
+  if (viewer.getBody() !== builder.mesh) viewer.setBody(builder.mesh); else viewer.requestRender();
+  applyLighting();
+  bodyLabel = builderLabel();
+  bodyInfo = ` · BMI ≈ ${builder.bmi().bmi.toFixed(1)}`;
+  afterBodyChange(opts);
+  bodyStatus();
+  refreshBodyPanel();
+}
+
+let settleTimer = 0;
+/** Slider moved: reshape the body now, re-anchor the designs when the hand stops. */
+function setBuilderParams(params: BodyParams, live: boolean) {
+  if (!builderState || !bodyData) return;
+  builderState.params = params;
+  builderState.presetId = null;
+  if (bodySource !== 'builder' || !builder) { showBuilder(); return; }
+  builder.update(params, heightM());
+  viewer.requestRender();
+  // Decals are computed on the old shape; hide them until the shape settles.
+  for (const d of placed) d.decal.mesh.visible = false;
+  gizmo.set(null, null);
+  bodyLabel = builderLabel();
+  bodyInfo = ` · BMI ≈ ${builder.bmi().bmi.toFixed(1)}`;
+  bodyStatus();
+  refreshBodyPanel();
+  window.clearTimeout(settleTimer);
+  settleTimer = window.setTimeout(() => {
+    saveBuilderState();
+    afterBodyChange({ frame: false });
+    for (const d of placed) d.decal.mesh.visible = !d.placement.hidden;
+    updateGizmo();
+  }, live ? 350 : 0);
+}
+
+function choosePreset(p: PresetMeta) {
+  if (!builderState || !bodyData) return;
+  builderState.params = presetParamsAtHeight(bodyData, p, heightM());
+  builderState.base = JSON.parse(JSON.stringify(builderState.params));
+  builderState.presetId = p.id;
+  saveBuilderState();
+  showBuilder({ frame: bodySource !== 'builder' });
+}
+
+function setAppearance(a: Appearance) {
+  if (!builderState) return;
+  builderState.appearance = a;
+  saveBuilderState();
+  builder?.setAppearance(a);
+  viewer.requestRender();
+  refreshBodyPanel();
+}
+
+function openBodyPanel() {
+  if (!builderState) { setStatus('The body builder is not available (its data did not load).'); return; }
+  if (!bodyPanel) {
+    bodyPanel = new BodyPanel(stage, bodyData, { source: bodySource, params: builderState.params, appearance: builderState.appearance, presetId: builderState.presetId, base: builderState.base ?? null, heightCm, bmi: builder ? builder.bmi() : null }, {
+      onParams: setBuilderParams,
+      onPreset: choosePreset,
+      onAppearance: setAppearance,
+      onHeight: (cm) => setHeight(cm),
+      onUseBuilder: () => showBuilder(),
+      onLoadScan: () => fileInput.click(),
+      onClose: closeBodyPanel,
+    });
+  }
+  refreshBodyPanel();
+  bodyPanel.show();
+  stage.classList.add('body-open');
+  $('btn-shape').classList.add('active');
+  updateViewInsets();
+}
+
+/** Centre the body in the part of the screen the body panel leaves free. */
+let insetBottom = 0;
+function updateViewInsets() {
+  const before = insetBottom;
+  if (!bodyPanel?.open) { viewer.setInsets({}); insetBottom = 0; }
+  else {
+    const r = bodyPanel.el.getBoundingClientRect(), s = stage.getBoundingClientRect();
+    if (r.width < s.width * 0.9) { viewer.setInsets({ right: r.width }); insetBottom = 0; }
+    else { viewer.setInsets({ bottom: r.height }); insetBottom = r.height; }
+  }
+  // A bottom sheet changes how much height is free: re-frame the whole body.
+  if (insetBottom !== before) viewer.frameBody(heightM());
+}
+window.addEventListener('resize', updateViewInsets);
+
+function closeBodyPanel() {
+  bodyPanel?.hide();
+  stage.classList.remove('body-open');
+  $('btn-shape').classList.remove('active');
+  updateViewInsets();
 }
 
 function showPlaceholder() {
@@ -82,6 +238,7 @@ function showPlaceholder() {
   setTimeout(() => {
     const { mesh, triangles } = makePlaceholderBody(heightM(), 0.01);
     scanObject = null;
+    bodySource = 'mannequin';
     viewer.setBody(mesh);
     applyLighting();
     mesh.updateMatrixWorld(true);
@@ -138,6 +295,8 @@ function applyScan() {
   // If the automatic upright fix fired, record it so manual turns start from what is on screen.
   if (info.rotatedToYUp && !orientManual) orient = { up: 'z', turn: orient.turn };
   viewer.setBody(group);
+  bodySource = 'scan';
+  refreshBodyPanel();
   applyLighting();
   const notes = [scanInfo.textured ? 'textured' : '', info.rotatedToYUp ? 'rotated to upright' : '', orientManual ? `up ${orient.up}, turned ${orient.turn * 90}°` : ''].filter(Boolean);
   bodyInfo = ` · ${(scanInfo.triangles / 1000).toFixed(0)}k triangles${notes.length ? ' · ' + notes.join(' · ') : ''}`;
@@ -163,7 +322,15 @@ function setHeight(cm: number) {
   heightCm = Math.max(50, Math.min(250, Math.round(cm)));
   localStorage.setItem(HEIGHT_KEY, String(heightCm));
   const body = viewer.getBody();
+  refreshBodyPanel();
   if (!body) return;
+  if (bodySource === 'builder') {
+    // An untouched preset keeps its BMI at the new height; custom bodies keep their sliders.
+    const preset = presetById(builderState?.presetId ?? null);
+    if (preset && builderState && bodyData) { builderState.params = presetParamsAtHeight(bodyData, preset, heightM()); builderState.base = JSON.parse(JSON.stringify(builderState.params)); saveBuilderState(); }
+    showBuilder({ frame: true }); // same mesh connectivity: designs stay put
+    return;
+  }
   // Keep the placements: they are re-applied by location after the body is rebuilt.
   restorePending = projectData();
   if ((body as Mesh).name === 'placeholder-body') showPlaceholder();
@@ -172,7 +339,8 @@ function setHeight(cm: number) {
 
 function goTo(def: RegionDef) {
   if (!surface) return;
-  const pose = locateRegion(def, surface.positions, heightM());
+  const labels = surface.labels && surface.partNames ? { labels: surface.labels, names: surface.partNames } : undefined;
+  const pose = locateRegion(def, surface.positions, heightM(), labels);
   if (!pose) { setStatus(`Could not find ${def.label} on this body`); return; }
   viewer.flyTo(pose);
   setStatus(def.label);
@@ -320,7 +488,10 @@ function projectData(): ProjectData {
   const used = new Set(placed.map((d) => d.placement.designId));
   return {
     version: 1, savedAt: new Date().toISOString(), heightCm,
-    body: { label: bodyLabel, triangles: bodyTriangles },
+    body: {
+      label: bodyLabel, triangles: bodyTriangles, topology: surface?.topology,
+      builder: bodySource === 'builder' && builderState ? JSON.parse(JSON.stringify(builderState)) : undefined,
+    },
     designs: [...designs.entries.values()].filter((e) => used.has(e.source.id)).map((e) => e.source),
     placements: snapshot(), selectedId: selected?.placement.id ?? null,
   };
@@ -383,9 +554,16 @@ async function applyProject(data: ProjectData) {
     setStatus(`Could not restore a design: ${(err as Error).message}`);
   }
   const sameBody = data.body.triangles === bodyTriangles;
+  const sameTopology = !!data.body.topology && data.body.topology === surface.topology && sameBody;
   let refitted = 0;
   for (const p of data.placements) {
     if (!designs.get(p.designId)) continue;
+    if (sameTopology && p.bary && p.tri >= 0 && p.tri < bodyTriangles) {
+      p.point = pointFromBary(surface, p.tri, p.bary);
+      const d = makePlaced(p);
+      if (d) recompute(d, true);
+      continue;
+    }
     // Validate the anchor triangle; fall back to the nearest triangle to the saved point.
     let ok = sameBody && p.tri >= 0 && p.tri < bodyTriangles;
     if (ok) {
@@ -427,6 +605,14 @@ async function openProject(file: File) {
     const data = JSON.parse(await file.text()) as ProjectData;
     if (data.version !== 1 || !Array.isArray(data.placements)) throw new Error('not a tattoo project file');
     clearPlacements();
+    if (data.body.builder && bodyData) {
+      builderState = JSON.parse(JSON.stringify(data.body.builder)) as BuilderState;
+      saveBuilderState();
+      if (data.heightCm) { heightCm = data.heightCm; localStorage.setItem(HEIGHT_KEY, String(heightCm)); }
+      restorePending = data;
+      showBuilder();
+      return;
+    }
     if (data.heightCm && data.heightCm !== heightCm) { restorePending = data; setHeight(data.heightCm); }
     else await applyProject(data);
   } catch (err) {
@@ -624,11 +810,13 @@ $('btn-add').addEventListener('click', () => addSheet.open([
   ...[...designs.entries.values()].filter((e) => e.source.name !== 'test-pattern.svg').map((e) => ({ label: `Place again: ${e.source.name}`, onClick: () => startPlacing(e) })),
 ]));
 $('btn-parts').addEventListener('click', picker.open);
+$('btn-shape').addEventListener('click', () => (bodyPanel?.open ? closeBodyPanel() : openBodyPanel()));
 $('btn-undo').addEventListener('click', undo);
 $('btn-redo').addEventListener('click', redo);
 $('btn-compare').addEventListener('click', () => setCompare(!compare));
 $('btn-photo').addEventListener('click', () => void takePhoto());
 $('btn-more').addEventListener('click', () => moreSheet.open([
+  { label: 'Body shape', hint: 'Presets and sliders', onClick: openBodyPanel },
   { label: 'Load my scan', hint: 'GLB, OBJ or PLY from this device', onClick: () => fileInput.click() },
   { label: 'Save project', hint: 'Designs and placements as a file', onClick: saveProject },
   { label: 'Open project', hint: 'A saved .json file', onClick: () => projectInput.click() },
@@ -713,6 +901,31 @@ try {
   undo, redo, setCompare,
   orient: () => orient, changeOrientation, status: () => status.textContent,
   setMeasure, measureTap, pickSurface, measureText: () => $('measure-text').textContent,
+  openBodyPanel, closeBodyPanel, choosePreset: (id: string) => { const p = presetById(id); if (p) choosePreset(p); },
+  setBuilderParams, builderState: () => builderState, bodySource: () => bodySource,
+  surfaceInfo: () => (surface ? { tris: surface.indices.length / 3, topology: surface.topology, labels: !!surface.labels } : null),
 };
 
-showPlaceholder();
+async function start() {
+  setStatus('Loading bodies…');
+  try {
+    bodyData = await loadBodyData(import.meta.env.BASE_URL);
+    if (!builderState || !builderState.params) {
+      const first = bodyData.meta.presets[0];
+      const params = presetParamsAtHeight(bodyData, first, heightM());
+      builderState = { params, appearance: { skinTone: SKIN_TONES[2] }, presetId: first.id, base: JSON.parse(JSON.stringify(params)) };
+    }
+    builderState.params = { ...defaultParams(), ...builderState.params, details: { ...(builderState.params.details ?? {}) } };
+    builderState.appearance = { skinTone: builderState.appearance?.skinTone ?? SKIN_TONES[2] };
+    showBuilder();
+    if (!builderStored && !restorePending) {
+      openBodyPanel();
+      setStatus('Choose a starting body, then adjust the sliders to match.');
+    }
+  } catch (err) {
+    console.error(err);
+    setStatus(`Body builder unavailable (${(err as Error).message}); using the simple mannequin.`);
+    showPlaceholder();
+  }
+}
+void start();

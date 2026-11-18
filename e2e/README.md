@@ -14,6 +14,7 @@ node e2e/measure.mjs /tmp/shots              # tape measure, keyboard nudges
 npx vite-node e2e/make-test-obj.ts /tmp/obj  # synthetic Z-up OBJ
 node e2e/scan-orientation.mjs /tmp/shots /tmp/obj
 node e2e/capture.mjs /tmp/shots              # capture page with a fake camera
+node e2e/body-builder.mjs /tmp/shots         # presets, sliders, designs across body changes
 ```
 
 Each script prints what it measured (for example "drag: anchor screen y

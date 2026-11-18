@@ -57,6 +57,7 @@ export class PlacedDesign {
     const t0 = performance.now();
     const p = this.placement;
     const bary = barycentric(surface, p.tri, p.point);
+    p.bary = [bary[0], bary[1], bary[2]];
     const normal = normalAt(surface, p.tri, bary);
     p.normal = normal;
     const tangent = designTangent(normal, p.rotation);
@@ -189,4 +190,15 @@ export function nearestTriangle(surface: SurfaceMesh, p: [number, number, number
     if (d < bd) { bd = d; best = t; }
   }
   return { tri: best, dist: Math.sqrt(bd) };
+}
+
+/** Point on triangle `tri` of `surface` at barycentric coordinates `b`. */
+export function pointFromBary(surface: SurfaceMesh, tri: number, b: [number, number, number]): [number, number, number] {
+  const I = surface.indices, P = surface.positions;
+  const a = I[tri * 3] * 3, c1 = I[tri * 3 + 1] * 3, c2 = I[tri * 3 + 2] * 3;
+  return [
+    b[0] * P[a] + b[1] * P[c1] + b[2] * P[c2],
+    b[0] * P[a + 1] + b[1] * P[c1 + 1] + b[2] * P[c2 + 1],
+    b[0] * P[a + 2] + b[1] * P[c1 + 2] + b[2] * P[c2 + 2],
+  ];
 }

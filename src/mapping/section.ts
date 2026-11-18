@@ -32,11 +32,14 @@ function edgeMap(mesh: SurfaceMesh): Map<number, [number, number]> {
   return m;
 }
 
-export function sectionLoop(mesh: SurfaceMesh, startTri: number, point: [number, number, number], axis: [number, number, number], maxSteps = 200000): Section {
+export function sectionLoop(mesh: SurfaceMesh, startTriIn: number, point: [number, number, number], axis: [number, number, number], maxSteps = 200000): Section {
+  let startTri = startTriIn;
   const P = mesh.positions, I = mesh.indices;
   const edges = edgeMap(mesh);
   const [ax, ay, az] = axis;
-  const d0 = ax * point[0] + ay * point[1] + az * point[2];
+  // Shift the plane by 0.1 micrometre so no vertex lies exactly on it (rings of
+  // vertices on a regular mesh would otherwise make the crossing ambiguous).
+  const d0 = ax * point[0] + ay * point[1] + az * point[2] + 1e-7;
   const sd = (v: number) => ax * P[v * 3] + ay * P[v * 3 + 1] + az * P[v * 3 + 2] - d0;
   const crossPoint = (a: number, b: number): [number, number, number] => {
     const da = sd(a), db = sd(b);
@@ -53,8 +56,26 @@ export function sectionLoop(mesh: SurfaceMesh, startTri: number, point: [number,
     }
     return out;
   };
-  const start = crossedEdges(startTri);
-  if (start.length < 2) return { length: 0, closed: false, points: new Float32Array(0) };
+  let start = crossedEdges(startTri);
+  if (start.length < 2) {
+    // The point sits on a vertex or edge, so the plane only touches this
+    // triangle. Start from the nearest neighbouring triangle it does cut.
+    let best = -1, bestD = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const v = I[startTri * 3 + k];
+      for (let j = mesh.triOffset[v]; j < mesh.triOffset[v + 1]; j++) {
+        const t = mesh.vertTris[j];
+        if (crossedEdges(t).length < 2) continue;
+        let cx = 0, cy = 0, cz = 0;
+        for (let m = 0; m < 3; m++) { const u = I[t * 3 + m] * 3; cx += P[u] / 3; cy += P[u + 1] / 3; cz += P[u + 2] / 3; }
+        const d = Math.hypot(cx - point[0], cy - point[1], cz - point[2]);
+        if (d < bestD) { bestD = d; best = t; }
+      }
+    }
+    if (best < 0) return { length: 0, closed: false, points: new Float32Array(0) };
+    startTri = best;
+    start = crossedEdges(startTri);
+  }
   const pts: number[] = [];
   let length = 0;
   let tri = startTri;

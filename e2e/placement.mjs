@@ -22,6 +22,8 @@ async function desktop() {
   page.on('pageerror', (e) => log(`[desktop] pageerror: ${e.message}`));
   await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
   await page.waitForFunction(() => !document.getElementById('status').textContent.includes('Building'), null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__app?.surfaceInfo?.() !== null, null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.closeBodyPanel?.());
   await page.waitForTimeout(800);
   const stage = await page.locator('#stage').boundingBox();
   const cx = stage.x + stage.width / 2, cy = stage.y + stage.height / 2;
@@ -115,6 +117,8 @@ async function desktop() {
   // 9. Reload: autosave restores
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForFunction(() => !document.getElementById('status').textContent.includes('Building'), null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__app?.surfaceInfo?.() !== null, null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.closeBodyPanel?.());
   await page.waitForTimeout(1500); await idle(page);
   log(`after reload: ${await page.evaluate(() => window.__app.placed().length)} placed, status "${await page.textContent('#status')}"`);
   await page.evaluate(() => window.__app.goTo('shoulder-left')); await page.waitForTimeout(900);
@@ -128,6 +132,8 @@ async function phone() {
   page.on('pageerror', (e) => log(`[phone] pageerror: ${e.message}`));
   await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
   await page.waitForFunction(() => !document.getElementById('status').textContent.includes('Building'), null, { timeout: 30000 });
+  await page.waitForFunction(() => window.__app?.surfaceInfo?.() !== null, null, { timeout: 60000 });
+  await page.evaluate(() => window.__app.closeBodyPanel?.());
   await page.waitForTimeout(1500); await idle(page);
   log(`[phone] restored from autosave: ${await page.evaluate(() => window.__app.placed().length)}`);
   await page.evaluate(() => window.__app.goTo('forearm-outer-left')); await page.waitForTimeout(900);
