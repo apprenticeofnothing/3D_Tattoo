@@ -8,6 +8,7 @@ import {
   PerspectiveCamera, Quaternion, Scene, Vector3, Vector4, WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { zoomTowards } from './zoom';
 
 export interface FlyTarget { target: Vector3; position: Vector3 }
 export type CompareSide = 'left' | 'right';
@@ -24,6 +25,12 @@ export class Viewer {
   private body: Object3D | null = null;
   private needsRender = true;
   private fly: { from: FlyTarget; to: FlyTarget; start: number; duration: number } | null = null;
+  private zoomGoal: { camera: Vector3; target: Vector3 } | null = null;
+  static readonly MIN_DIST = 0.07;
+  /** Orbit limit (large, so a phone's bottom sheet can still frame the whole body). */
+  static readonly MAX_DIST = 25;
+  /** How far wheel, pinch and buttons may zoom out. */
+  static readonly MAX_ZOOM_OUT = 10;
   private readonly floor: GridHelper;
   private width = 1; private height = 1;
   /** Screen space covered by side or bottom panels; the view is centred in what remains. */
@@ -58,8 +65,10 @@ export class Viewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.12;
     this.controls.screenSpacePanning = true;
-    this.controls.minDistance = 0.15;
-    this.controls.maxDistance = 25;
+    this.controls.minDistance = Viewer.MIN_DIST;
+    this.controls.maxDistance = Viewer.MAX_DIST;
+    // Pinch on a phone zooms towards the point between the fingers.
+    this.controls.zoomToCursor = true;
     this.controls.target.set(0, 1.0, 0);
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
@@ -102,8 +111,34 @@ export class Viewer {
     return out;
   }
 
+  /**
+   * Zoom towards `anchor` (a point on the body under the cursor): factor < 1
+   * zooms in. Successive calls accumulate and the camera glides there, so a
+   * mouse wheel feels smooth and a trackpad pinch stays responsive.
+   */
+  zoomAt(anchor: Vector3, factor: number): void {
+    this.fly = null;
+    const from = this.zoomGoal ?? { camera: this.camera.position.clone(), target: this.controls.target.clone() };
+    const r = zoomTowards(from.camera, from.target, anchor, factor, Viewer.MIN_DIST, Viewer.MAX_ZOOM_OUT);
+    // Slide the orbit target along the line of sight to the depth of the
+    // zoomed spot: the view is unchanged, orbiting then pivots around that
+    // spot, and the orbit control's minimum distance never fights the zoom.
+    const dir = r.target.clone().sub(r.camera).normalize();
+    const depth = Math.max(Viewer.MIN_DIST * 1.05, anchor.clone().sub(r.camera).dot(dir));
+    const target = r.camera.clone().addScaledVector(dir, depth);
+    this.zoomGoal = { camera: r.camera, target };
+    this.needsRender = true;
+  }
+
+  /** True when no zoom glide or camera flight is in progress. */
+  isSettled(): boolean { return !this.zoomGoal && !this.fly; }
+
+  /** Distance from the camera to its orbit target (for tests and UI). */
+  zoomDistance(): number { return this.camera.position.distanceTo(this.controls.target); }
+
   /** Smoothly move the camera. */
   flyTo(to: FlyTarget, duration = 650): void {
+    this.zoomGoal = null;
     this.fly = {
       from: { target: this.controls.target.clone(), position: this.camera.position.clone() },
       to: { target: to.target.clone(), position: to.position.clone() },
@@ -121,6 +156,7 @@ export class Viewer {
    */
   spin(dYaw: number, dPitch: number, center: Vector3): void {
     this.fly = null;
+    if (this.zoomGoal) { this.camera.position.copy(this.zoomGoal.camera); this.controls.target.copy(this.zoomGoal.target); this.zoomGoal = null; }
     const cam = this.camera.position, tgt = this.controls.target;
     if (dYaw) {
       const q = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), dYaw);
@@ -249,6 +285,15 @@ export class Viewer {
   }
 
   private tick(now: number): void {
+    if (this.zoomGoal) {
+      const g = this.zoomGoal;
+      this.camera.position.lerp(g.camera, 0.35);
+      this.controls.target.lerp(g.target, 0.35);
+      if (this.camera.position.distanceToSquared(g.camera) < 1e-10 && this.controls.target.distanceToSquared(g.target) < 1e-10) {
+        this.camera.position.copy(g.camera); this.controls.target.copy(g.target); this.zoomGoal = null;
+      }
+      this.needsRender = true;
+    }
     if (this.fly) {
       const f = this.fly;
       let u = Math.min(1, (now - f.start) / f.duration);

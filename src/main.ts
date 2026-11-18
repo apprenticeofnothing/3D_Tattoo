@@ -13,6 +13,7 @@ import { SelectionGizmo } from './viewer/SelectionGizmo';
 import { MeasureOverlay } from './viewer/MeasureOverlay';
 import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles';
 import { TurntableRing } from './viewer/TurntableRing';
+import { wheelFactor } from './viewer/zoom';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
 import { surfaceFromObject, triangleForHit, type SurfaceMesh } from './mesh/topology';
 import { DesignStore, type DesignEntry } from './app/designs';
@@ -823,6 +824,7 @@ let drag: Drag | null = null;
 const HANDLE_RADIUS = 30;
 let grabbedJoint: { side: ArmSide; joint: JointId } | null = null;
 let spinSign = 1;
+let lastTap: { x: number; y: number; t: number } | null = null;
 let spinLast = { x: 0, y: 0 };
 
 /** Is the pointer on the turntable ring? Returns the grabbed ring point, or null. */
@@ -890,6 +892,15 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     return null;
   },
   onTap(x, y) {
+    // Double tap (or double click) on the body zooms in on that spot.
+    const now = performance.now();
+    const dbl = lastTap && now - lastTap.t < 350 && Math.hypot(x - lastTap.x, y - lastTap.y) < 25;
+    lastTap = dbl ? null : { x, y, t: now };
+    if (dbl && !pending && !measuring && !ringHit(x, y)) {
+      raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
+      const hit = raycaster.intersectObjects(viewer.bodyMeshes(), false)[0];
+      if (hit) { viewer.zoomAt(hit.point.clone(), 0.45); return; }
+    }
     if (measuring) { const hit = pickSurface(x, y); if (hit) measureTap(hit); return; }
     if (pending) {
       const hit = pickSurface(x, y);
@@ -1009,6 +1020,49 @@ viewer.renderer.domElement.addEventListener('dblclick', (e) => {
 });
 $('view-chips').querySelectorAll<HTMLButtonElement>('[data-yaw]').forEach((b) => b.addEventListener('click', () => viewer.viewFrom(Number(b.dataset.yaw), heightM())));
 
+// ---------- Zoom ----------
+
+/**
+ * The point to zoom towards: the skin under (x, y), else the orbit target's
+ * depth under (x, y). Successive wheel steps at the same pointer position
+ * reuse the anchor, so a quick series of steps scales exactly about that
+ * spot even while the camera is still gliding.
+ */
+let lastAnchor: { x: number; y: number; t: number; p: Vector3 } | null = null;
+function zoomAnchor(x: number, y: number): Vector3 {
+  const now = performance.now();
+  if (lastAnchor && now - lastAnchor.t < 500 && Math.hypot(x - lastAnchor.x, y - lastAnchor.y) < 3) {
+    lastAnchor.t = now;
+    return lastAnchor.p.clone();
+  }
+  const p = freshZoomAnchor(x, y);
+  lastAnchor = { x, y, t: now, p: p.clone() };
+  return p;
+}
+function freshZoomAnchor(x: number, y: number): Vector3 {
+  raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
+  const hit = raycaster.intersectObjects(viewer.bodyMeshes(), false)[0];
+  if (hit) return hit.point.clone();
+  const n = new Vector3(); viewer.camera.getWorldDirection(n);
+  const p = new Vector3();
+  return raycaster.ray.intersectPlane(new Plane().setFromNormalAndCoplanarPoint(n, viewer.controls.target), p) ? p : viewer.controls.target.clone();
+}
+
+/** Zoom towards the centre of the view (buttons and keys). */
+function zoomCentre(factor: number) {
+  const r = viewer.renderer.domElement.getBoundingClientRect();
+  viewer.zoomAt(zoomAnchor(r.left + r.width / 2, r.top + r.height / 2), factor);
+}
+
+// Mouse wheel, trackpad scroll and trackpad pinch (ctrlKey) zoom towards the pointer.
+stage.addEventListener('wheel', (e) => {
+  if ((e.target as HTMLElement).closest('.panel, .body-panel, .sheet, .view-chips, .measure-bar')) return; // let panels scroll
+  e.preventDefault();
+  e.stopPropagation(); // OrbitControls would zoom to its target instead
+  viewer.zoomAt(zoomAnchor(e.clientX, e.clientY), wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey));
+}, { capture: true, passive: false });
+$('view-chips').querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((b) => b.addEventListener('click', () => zoomCentre(b.dataset.zoom === 'in' ? 0.7 : 1 / 0.7)));
+
 // ---------- UI wiring ----------
 
 const panel = new Panel(stage, {
@@ -1085,6 +1139,9 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
   else if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && selected) { e.preventDefault(); removeDesign(selected); }
+  else if (!mod && (e.key === '+' || e.key === '=')) { e.preventDefault(); zoomCentre(0.7); }
+  else if (!mod && (e.key === '-' || e.key === '_')) { e.preventDefault(); zoomCentre(1 / 0.7); }
+  else if (!mod && e.key === '0') { e.preventDefault(); viewer.frameBody(heightM()); }
   else if (!selected && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
     e.preventDefault();
     const step = (e.shiftKey ? 45 : 15) * Math.PI / 180;
@@ -1144,6 +1201,10 @@ try {
   cameraYaw: () => Math.atan2(viewer.camera.position.x, viewer.camera.position.z) * 180 / Math.PI,
   cameraElevation: () => { const o = viewer.camera.position.clone().sub(bodyCentre()); return Math.asin(o.y / o.length()) * 180 / Math.PI; },
   viewFrom: (yaw: number) => viewer.viewFrom(yaw, heightM()),
+  zoomDistance: () => viewer.zoomDistance(),
+  zoomSettled: () => viewer.isSettled(),
+  cameraDistanceTo: (p: number[]) => viewer.camera.position.distanceTo(new Vector3(p[0], p[1], p[2])),
+  pickAt: (x: number, y: number) => { const h = pickSurface(x, y); return h ? h.shown : null; },
   jointScreen: (side: ArmSide, joint: JointId) => { if (!builder) return null; const p = builder.posedWorldJoint(side, joint); return toScreen([p.x, p.y, p.z]); },
   posedJoint: (side: ArmSide, joint: JointId | 'shoulder') => builder ? builder.posedWorldJoint(side, joint).toArray() : null,
   setSkinMix: (m: number) => { if (builder) { builder.skinMix = m; builder.setPose(builder.pose); const D = display(); for (const d of placed) d.decal.setPositions(D); viewer.requestRender(); } },

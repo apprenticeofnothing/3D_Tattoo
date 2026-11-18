@@ -67,6 +67,11 @@ both devices are on the same Wi-Fi.
   double-click the ring for the front view, or use the Front, Left, Back
   and Right buttons. Arrow keys turn and tilt when no design is selected.
   Lights travel with the view so every side is evenly lit.
+- Zoom: mouse wheel, trackpad scroll and trackpad pinch zoom towards the
+  point under the pointer (that spot of skin stays put), pinch with two
+  fingers on a phone, double-click or double-tap the body to zoom in
+  there, − and + buttons, keys + and − (0 shows the whole body). Close
+  enough to inspect fine lines (about 7 cm from the skin).
 - Phase 5 (polish, in progress): tape measure (distance along the skin
   between two taps, circumference of a limb at a tap, both drawn on the
   body), keyboard nudging (arrows 1 mm, Shift 10 mm, [ ] rotate 1°).

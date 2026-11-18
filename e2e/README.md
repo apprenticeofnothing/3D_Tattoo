@@ -18,6 +18,7 @@ node e2e/body-builder.mjs /tmp/shots         # presets, sliders, designs across 
 node e2e/arm-pose.mjs /tmp/shots             # arm poses, designs riding on the skin, tap/drag/measure when posed
 node e2e/joint-drag.mjs /tmp/shots           # grab wrist/elbow rings and move the arm (mouse and touch)
 node e2e/turn-body.mjs /tmp/shots            # turn and tilt the body with the floor ring, view buttons
+node e2e/zoom.mjs /tmp/shots                 # wheel, trackpad pinch, buttons, keys, double-click, phone pinch
 ```
 
 Each script prints what it measured (for example "drag: anchor screen y
