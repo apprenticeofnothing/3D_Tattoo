@@ -32,6 +32,10 @@ export interface PlacementData {
    *  connectivity (the body builder) this pins the design to the same spot on
    *  the skin whatever the body shape. */
   bary?: [number, number, number];
+  /** A tattoo the person already has (from a photo or their scan), not a new design. */
+  existing?: boolean;
+  /** Locked in place: can be selected but not moved, turned or resized. */
+  locked?: boolean;
 }
 
 export interface ProjectData {

@@ -30,6 +30,8 @@ export class Panel {
   private readout: HTMLElement;
   private current: PlacedDesign | null = null;
   private collapsed = false;
+  /** Cover-up check under the readout (filled in by the app). */
+  cover!: HTMLElement;
 
   constructor(root: HTMLElement, private cb: PanelCallbacks) {
     this.el = document.createElement('div');
@@ -37,6 +39,7 @@ export class Panel {
     this.el.innerHTML = `
       <div class="panel-head">
         <div class="chips" id="p-chips"></div>
+        <span class="badge hidden" id="p-badge">Existing tattoo</span>
         <span class="muted" id="p-summary"></span>
         <button class="btn ghost" id="p-collapse">Hide</button>
       </div>
@@ -65,12 +68,14 @@ export class Panel {
           <button class="btn seg-btn" data-option="B">B</button>
           <button class="btn seg-btn" data-option="both">Both</button>
         </div>
+        <button id="p-lock" class="btn toggle hidden">Locked</button>
         <button id="p-export" class="btn primary">Export stencil</button>
         <button id="p-hide" class="btn toggle">Hide design</button>
         <button id="p-dup" class="btn">Duplicate</button>
         <button id="p-remove" class="btn danger">Remove</button>
       </div>
-      <div id="p-readout" class="readout"></div>`;
+      <div id="p-readout" class="readout"></div>
+      <div id="p-cover" class="readout cover hidden"></div>`;
     root.appendChild(this.el);
     const q = <T extends HTMLElement>(id: string) => this.el.querySelector(`#${id}`) as T;
     this.chips = q('p-chips'); this.summary = q('p-summary');
@@ -88,6 +93,8 @@ export class Panel {
     this.rot.addEventListener('input', () => { this.rotVal.textContent = `${this.rot.value}°`; cb.onChange({ rotation: (Number(this.rot.value) * Math.PI) / 180 }, false); });
     this.rot.addEventListener('change', () => cb.onChange({ rotation: (Number(this.rot.value) * Math.PI) / 180 }, true));
     q('p-mirror').addEventListener('click', () => { if (this.current) cb.onChange({ mirror: !this.current.placement.mirror }, true); });
+    q('p-lock').addEventListener('click', () => { if (this.current) cb.onChange({ locked: !this.current.placement.locked }, true); });
+    this.cover = q('p-cover');
     q('p-wrap').addEventListener('click', () => { if (this.current) cb.onChange({ wrap: !this.current.placement.wrap }, true); });
     this.el.querySelectorAll<HTMLButtonElement>('#p-modes .seg-btn').forEach((b) => b.addEventListener('click', () => cb.onChange({ mode: b.dataset.mode as ViewMode }, true)));
     this.el.querySelectorAll<HTMLButtonElement>('#p-options .seg-btn').forEach((b) => b.addEventListener('click', () => cb.onChange({ option: b.dataset.option as Option }, true)));
@@ -112,9 +119,9 @@ export class Panel {
     this.chips.innerHTML = '';
     list.forEach((d, i) => {
       const b = document.createElement('button');
-      b.className = 'chip' + (d.placement.id === selectedId ? ' active' : '');
+      b.className = 'chip' + (d.placement.id === selectedId ? ' active' : '') + (d.placement.existing ? ' existing' : '');
       const name = d.placement.design.name.replace(/\.[a-z0-9]+$/i, '');
-      b.textContent = `${i + 1} ${name.length > 14 ? name.slice(0, 13) + '…' : name}`;
+      b.textContent = `${i + 1} ${d.placement.existing ? 'Old: ' : ''}${name.length > 14 ? name.slice(0, 13) + '…' : name}`;
       b.title = d.placement.design.name;
       b.addEventListener('click', () => this.cb.onSelect(d.placement.id));
       this.chips.appendChild(b);
@@ -133,6 +140,13 @@ export class Panel {
     this.el.querySelector('#p-mirror')!.classList.toggle('active', p.mirror);
     this.el.querySelector('#p-wrap')!.classList.toggle('active', p.wrap);
     this.el.querySelector('#p-hide')!.classList.toggle('active', !!p.hidden);
+    const lock = this.el.querySelector('#p-lock')!;
+    lock.classList.toggle('hidden', !p.existing);
+    lock.classList.toggle('active', !!p.locked);
+    lock.textContent = p.locked ? 'Locked' : 'Lock in place';
+    this.el.querySelector('#p-badge')!.classList.toggle('hidden', !p.existing);
+    this.el.querySelector('#p-export')!.textContent = p.existing ? 'Export (reference)' : 'Export stencil';
+    this.el.querySelector('#p-hide')!.textContent = p.existing ? 'Hide tattoo' : 'Hide design';
     this.opacity.value = String(p.opacity);
     this.el.querySelectorAll<HTMLButtonElement>('#p-modes .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === p.mode));
     this.el.querySelectorAll<HTMLButtonElement>('#p-options .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.option === p.option));
@@ -149,7 +163,9 @@ export class Panel {
     const worst = Math.max(s.worstStretch, -s.worstCompression);
     const cls = worst > 0.05 ? 'warn' : 'ok';
     const parts = [
-      `<b>${p.design.name}</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin. Resize with the yellow corner handle${RESIZE_HINT}.`,
+      p.existing
+        ? `<b>Existing tattoo</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin. ${p.locked ? 'Locked: tap "Locked" to move or resize it.' : `Drag it to where it really is and resize it to match${RESIZE_HINT}; then lock it.`}`
+        : `<b>${p.design.name}</b> ${p.widthCm} × ${r.heightCm.toFixed(1)} cm on the skin. Resize with the yellow corner handle${RESIZE_HINT}.`,
       `<span class="${cls}">Stretch up to ${pct(s.worstStretch)}, compression up to ${pct(-s.worstCompression)}; ${pct(s.areaOverThreshold)} of the design beyond 5%</span>`,
     ];
     if (worst > 0.05) parts.push(`<span class="warn">A paper stencil would ${s.worstCompression < -0.05 ? 'wrinkle' : 'tear'} there. Consider a smaller design or a flatter spot.</span>`);

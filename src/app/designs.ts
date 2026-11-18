@@ -35,6 +35,17 @@ export class DesignStore {
     return e;
   }
 
+  /** Add a design made in the app (e.g. a flattened photo of an existing tattoo). */
+  async addImage(canvas: HTMLCanvasElement, name: string, widthCm: number): Promise<DesignEntry> {
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('could not encode image'))), 'image/png'));
+    const file = new File([blob], name, { type: 'image/png' });
+    const source: DesignSource = { id: newId('design'), kind: 'bitmap', name, data: await readDataUrl(file) };
+    const image = await loadDesignFile(file);
+    const e = this.register(source, image);
+    e.defaultWidthCm = widthCm;
+    return e;
+  }
+
   /** Restore a design from saved data (keeps its id). */
   async addSource(source: DesignSource): Promise<DesignEntry> {
     const existing = this.entries.get(source.id);

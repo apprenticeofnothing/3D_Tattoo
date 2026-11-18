@@ -15,6 +15,9 @@ import { JointHandles, type ArmSide, type JointId } from './viewer/JointHandles'
 import { TurntableRing } from './viewer/TurntableRing';
 import { wheelFactor } from './viewer/zoom';
 import { ExportDialog, type ExportChoice } from './ui/exportDialog';
+import { ExistingImport, type ImportResult } from './ui/existingImport';
+import { widthFromCircumference } from './existing/flatten';
+import { tangentFrom } from './mapping/expmap';
 import { sourceImage, stencilPdf, stencilPng, stencilSvg } from './export/stencil';
 import { describeArea, describeRotation } from './export/placementText';
 import { circumferenceAt, distanceOnSkin, type SurfacePoint } from './mapping/measure';
@@ -436,12 +439,17 @@ function setHeight(cm: number) {
   else applyScan();
 }
 
-function goTo(def: RegionDef) {
-  if (!surface) return;
+function regionPose(def: RegionDef) {
+  if (!surface) return null;
   const labels = surface.labels && surface.partNames ? { labels: surface.labels, names: surface.partNames } : undefined;
   const posed = bodySource === 'builder' && builder && !isRestPose(builder.pose);
   const shownBody = posed && builder ? { positions: builder.displayPositions(), normals: builder.displayNormals() } : undefined;
-  const pose = locateRegion(def, surface.positions, heightM(), labels, shownBody);
+  return locateRegion(def, surface.positions, heightM(), labels, shownBody);
+}
+
+function goTo(def: RegionDef) {
+  if (!surface) return;
+  const pose = regionPose(def);
   if (!pose) { setStatus(`Could not find ${def.label} on this body`); return; }
   viewer.flyTo(pose);
   setStatus(def.label);
@@ -454,9 +462,23 @@ function ndcAt(clientX: number, clientY: number): Vector2 {
   const rect = viewer.renderer.domElement.getBoundingClientRect();
   return new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
 }
-function pickSurface(clientX: number, clientY: number): { tri: number; point: [number, number, number]; shown: [number, number, number] } | null {
+type SkinHit = { tri: number; point: [number, number, number]; shown: [number, number, number] };
+
+function pickSurface(clientX: number, clientY: number): SkinHit | null {
   if (!surface) return null;
   raycaster.setFromCamera(ndcAt(clientX, clientY), viewer.camera);
+  return firstSkinHit();
+}
+
+/** The skin seen from `from` looking at `to` (world space, as displayed). */
+function skinAlong(from: Vector3, to: Vector3): SkinHit | null {
+  if (!surface) return null;
+  raycaster.set(from, to.clone().sub(from).normalize());
+  return firstSkinHit();
+}
+
+function firstSkinHit(): SkinHit | null {
+  if (!surface) return null;
   const hits = raycaster.intersectObjects(viewer.bodyMeshes(), false);
   const hit = hits.find((h) => h.faceIndex !== undefined && h.faceIndex !== null);
   if (!hit) return null;
@@ -483,15 +505,21 @@ function pickDesign(clientX: number, clientY: number): PlacedDesign | null {
   raycaster.setFromCamera(ndcAt(clientX, clientY), viewer.camera);
   const meshes = placed.filter((d) => d.decal.mesh.visible).map((d) => d.decal.mesh);
   const hits = raycaster.intersectObjects(meshes, false);
+  // A new design over an existing tattoo wins: that is the one being worked on.
+  let existing: PlacedDesign | null = null;
   for (const h of hits) {
     const d = placed.find((x) => x.decal.mesh === h.object);
     if (!d || !h.uv) continue;
     const inV = h.uv.y >= 0 && h.uv.y <= 1;
     const inU = d.placement.wrap || (h.uv.x >= 0 && h.uv.x <= 1);
-    if (inV && inU) return d;
+    if (!inV || !inU) continue;
+    if (!d.placement.existing) return d;
+    existing ??= d;
   }
-  return null;
+  return existing;
 }
+
+const isLocked = (d: PlacedDesign | null) => !!d?.placement.locked;
 function toScreen(p: [number, number, number]): { x: number; y: number } {
   const rect = viewer.renderer.domElement.getBoundingClientRect();
   const v = new Vector3(...p).project(viewer.camera);
@@ -506,15 +534,18 @@ function makePlaced(data: PlacementData): PlacedDesign | null {
   const placement: Placement = { ...data, design: entry.image };
   const d = new PlacedDesign(placement);
   d.decal.mesh.visible = !placement.hidden;
+  // Existing tattoos are drawn first, so new designs layer over them like new ink.
+  if (placement.existing) d.decal.mesh.renderOrder = 9;
   placed.push(d);
   viewer.scene.add(d.decal.mesh);
   return d;
 }
 
-function place(entry: DesignEntry, tri: number, point: [number, number, number]): PlacedDesign | null {
+function place(entry: DesignEntry, tri: number, point: [number, number, number], extra: Partial<PlacementData> = {}): PlacedDesign | null {
   const data: PlacementData = {
     id: newId('p'), designId: entry.source.id, tri, point, normal: [0, 0, 1], rotation: 0,
     widthCm: entry.defaultWidthCm, mirror: false, wrap: false, opacity: 1, mode: 'stencil', option: 'both',
+    ...extra,
   };
   const d = makePlaced(data);
   if (!d) return null;
@@ -642,7 +673,8 @@ function keepClearOfPanel(d: PlacedDesign) {
 
 function updateGizmo() {
   if (!selected || !surface || compare || !selected.result || selected.placement.hidden) { gizmo.set(null, null); return; }
-  gizmo.set(selected.outline(surface, 0.004, display()), selected.handles(surface, display()));
+  const h = selected.handles(surface, display());
+  gizmo.set(selected.outline(surface, 0.004, display()), isLocked(selected) ? { rotate: null, scale: null } : h);
 }
 
 /** Apply a field change to the selected design. */
@@ -935,7 +967,7 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
   hitTest(x, y) {
     const jh = jointHit(x, y);
     if (jh) { grabbedJoint = jh; return 'joint'; }
-    if (!compare && surface && !measuring && selected?.result) {
+    if (!compare && surface && !measuring && selected?.result && !isLocked(selected)) {
       const h = selected.handles(surface, display());
       if (nearHandle(x, y, h.rotate)) return 'rotate';
       if (nearHandle(x, y, h.scale)) return 'scale';
@@ -948,14 +980,17 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
       return 'spin';
     }
     if (compare || !surface || measuring) return null;
-    if (selected?.result) {
+    if (selected?.result && !isLocked(selected)) {
       const h = selected.handles(surface, display());
       if (nearHandle(x, y, h.rotate)) return 'rotate';
       if (nearHandle(x, y, h.scale)) return 'scale';
     }
     if (pending) return null; // placing: let taps through, camera otherwise
     const d = pickDesign(x, y);
-    if (d) { if (d !== selected) select(d); return 'move'; }
+    if (d) {
+      if (d !== selected) select(d);
+      return isLocked(d) ? null : 'move'; // a locked tattoo is selected, the drag turns the view
+    }
     return null;
   },
   onTap(x, y) {
@@ -1337,9 +1372,73 @@ const addSheet = createSheet(app, 'Add a design');
 const moreSheet = createSheet(app, 'More');
 const orientSheet = createSheet(app, 'Orientation of the scan');
 
+// ---------- Existing tattoos ----------
+
+const existingInput = document.createElement('input');
+existingInput.type = 'file'; existingInput.accept = 'image/*'; existingInput.className = 'hidden';
+app.appendChild(existingInput);
+let lastExistingRegion = 'forearm-outer-left';
+const existingImport = new ExistingImport(document.body, {
+  regions: REGIONS,
+  initialRegionId: () => lastExistingRegion,
+  place: placeExisting,
+});
+existingInput.addEventListener('change', () => { const f = existingInput.files?.[0]; existingInput.value = ''; if (f) void existingImport.open(f); });
+
+/**
+ * Rotation that points the design's top along the limb towards the body
+ * (where the photo's "body end" was), at a spot on the rest-pose surface.
+ */
+function rotationTowardsBody(tri: number, point: [number, number, number], axis: [number, number, number]): number {
+  if (!surface) return 0;
+  const I = surface.indices, P = surface.positions;
+  const a = I[tri * 3] * 3, b = I[tri * 3 + 1] * 3, c = I[tri * 3 + 2] * 3;
+  const n = new Vector3(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]).cross(new Vector3(P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2])).normalize();
+  const N = surface.normals;
+  if (n.dot(new Vector3(N[I[tri * 3] * 3], N[I[tri * 3] * 3 + 1], N[I[tri * 3] * 3 + 2])) < 0) n.negate();
+  const want = new Vector3(...axis);
+  const toBody = new Vector3(0, heightM() * 0.55, 0).sub(new Vector3(...point));
+  if (want.dot(toBody) < 0) want.negate();
+  want.addScaledVector(n, -want.dot(n));
+  if (want.lengthSq() < 1e-8) return 0;
+  want.normalize();
+  const up = new Vector3(...tangentFrom([n.x, n.y, n.z], [0, 1, 0]));
+  return Math.atan2(new Vector3().crossVectors(up, want).dot(n), up.dot(want));
+}
+
+async function placeExisting(r: ImportResult): Promise<string | null> {
+  if (!surface) return 'The body is still loading. Try again in a moment.';
+  const def = REGIONS.find((x) => x.id === r.regionId);
+  const pose = def ? regionPose(def) : null;
+  if (!pose) return 'Could not find that part of this body. Pick another place.';
+  const hit = skinAlong(pose.position, pose.target);
+  if (!hit) return 'Could not find that part of this body. Pick another place.';
+  let width = r.widthCm, how = 'as you measured it';
+  let rotation = r.rotation;
+  if (r.kind === 'limb') {
+    const c = circumferenceAt(surface, hit, display());
+    if (c) {
+      if (!width) { width = widthFromCircumference(r.flattened, c.length * 100); how = 'worked out from the width of the limb'; }
+      rotation = rotationTowardsBody(hit.tri, hit.point, c.axis);
+    }
+  }
+  if (!width && r.estimateCm) { width = r.estimateCm; how = 'estimated from the photo'; }
+  if (!width) { width = 10; how = 'a starting guess'; }
+  width = Math.round(Math.min(150, Math.max(1, width)) * 10) / 10;
+  const entry = await designs.addImage(r.canvas, r.name, width);
+  lastExistingRegion = r.regionId;
+  pending = null; hint.classList.add('hidden');
+  const d = place(entry, hit.tri, hit.point, { existing: true, mode: 'inked', rotation });
+  if (!d) return 'Could not place it. Try again.';
+  viewer.flyTo(pose);
+  setStatus(`Existing tattoo placed, ${width} cm wide (${how}). Drag it to where it really is, match its size, then lock it.`);
+  return null;
+}
+
 $('btn-add').addEventListener('click', () => addSheet.open([
   { label: 'From a file', hint: 'SVG or PNG', onClick: () => designInput.click() },
   { label: 'Test pattern', hint: '10 cm grid with a 6 cm circle', onClick: () => void designs.addTestPattern().then(startPlacing) },
+  { label: 'Existing tattoo from a photo', hint: 'flatten a photo of a tattoo you already have and put it on the body', onClick: () => existingInput.click() },
   ...[...designs.entries.values()].filter((e) => e.source.name !== 'test-pattern.svg').map((e) => ({ label: `Place again: ${e.source.name}`, onClick: () => startPlacing(e) })),
 ]));
 $('btn-parts').addEventListener('click', picker.open);
@@ -1402,7 +1501,7 @@ window.addEventListener('keydown', (e) => {
     else viewer.spin(0, (e.key === 'ArrowUp' ? -1 : 1) * step * 0.66, bodyCentre());
   }
   else if (e.key === 'Escape') { if (measuring) setMeasure(null); else if (pending) { pending = null; hint.classList.add('hidden'); } else select(null); }
-  else if (selected && surface && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '[', ']'].includes(e.key)) {
+  else if (selected && surface && !isLocked(selected) && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '[', ']'].includes(e.key)) {
     e.preventDefault();
     const p = selected.placement;
     if (e.key === '[' || e.key === ']') {
@@ -1454,6 +1553,21 @@ try {
   cameraElevation: () => { const o = viewer.camera.position.clone().sub(bodyCentre()); return Math.asin(o.y / o.length()) * 180 / Math.PI; },
   viewFrom: (yaw: number) => viewer.viewFrom(yaw, heightM()),
   zoomDistance: () => viewer.zoomDistance(),
+  deselect: () => select(null),
+  cameraDir: () => { const v = new Vector3(); viewer.camera.getWorldDirection(v); return [v.x, v.y, v.z]; },
+  lookAt: (pos: number[], target: number[]) => viewer.flyTo({ position: new Vector3(pos[0], pos[1], pos[2]), target: new Vector3(target[0], target[1], target[2]) }, 1),
+  /** The view as a JPEG data URL without handles, ring or overlays (a stand-in for a phone photo). */
+  photoDataUrl: async () => {
+    const helpers = [gizmo.group, ring.group, jointHandles.group, measureOverlay.group];
+    const was = helpers.map((g) => g.visible);
+    helpers.forEach((g) => { g.visible = false; });
+    try {
+      const blob = await viewer.screenshot('image/jpeg');
+      return await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsDataURL(blob); });
+    } finally { helpers.forEach((g, i) => { g.visible = was[i]; }); viewer.requestRender(); }
+  },
+  openExistingPhoto: async (dataUrl: string, name = 'photo.jpg') => { const blob = await (await fetch(dataUrl)).blob(); await existingImport.open(new File([blob], name, { type: blob.type })); },
+  existingImport,
   openExport, runExport, sizeTagText: () => (sizeTag.classList.contains('hidden') ? null : sizeTag.textContent), placementLines: () => (selected ? placementLines(selected) : null),
   zoomSettled: () => viewer.isSettled(),
   cameraDistanceTo: (p: number[]) => viewer.camera.position.distanceTo(new Vector3(p[0], p[1], p[2])),
