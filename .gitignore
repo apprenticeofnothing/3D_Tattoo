@@ -19,3 +19,6 @@ dist/
 
 # Pose model and runtime, fetched by scripts/fetch-models.mjs
 /public/mediapipe/
+
+# Temporary copies of browser checks (local runs)
+e2e/.*.tmp.mjs
