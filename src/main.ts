@@ -128,6 +128,22 @@ function clearPlacements() {
  * exactly (same triangle and barycentric spot) when the mesh connectivity is
  * unchanged, as with the body builder; otherwise re-fitted by location.
  */
+/**
+ * The view turns around a point that must stay on the body (with a small
+ * margin), so zooming or panning can never leave you looking at nothing.
+ */
+function updateViewBounds() {
+  if (!surface) return;
+  const D = display();
+  const min = new Vector3(Infinity, Infinity, Infinity), max = new Vector3(-Infinity, -Infinity, -Infinity);
+  for (let i = 0; i < D.length; i += 3 * 5) {
+    min.x = Math.min(min.x, D[i]); min.y = Math.min(min.y, D[i + 1]); min.z = Math.min(min.z, D[i + 2]);
+    max.x = Math.max(max.x, D[i]); max.y = Math.max(max.y, D[i + 1]); max.z = Math.max(max.z, D[i + 2]);
+  }
+  const m = 0.04;
+  viewer.setBounds(min.subScalar(m), max.addScalar(m));
+}
+
 function afterBodyChange(opts: { frame?: boolean } = {}) {
   const body = viewer.getBody()!;
   const prev = surface;
@@ -135,6 +151,7 @@ function afterBodyChange(opts: { frame?: boolean } = {}) {
   surface = bodySource === 'builder' && builder && body === builder.mesh ? builder.restSurface() : surfaceFromObject(body);
   bodyTriangles = surface.indices.length / 3;
   ring.setRadius(0.3 * heightM());
+  updateViewBounds();
   if (opts.frame !== false) viewer.frameBody(heightM());
   if (restorePending) { clearPlacements(); const data = restorePending; restorePending = null; void applyProject(data); return; }
   if (carry && prev && prev.topology && prev.topology === surface.topology && prev.indices.length === surface.indices.length) {
@@ -309,7 +326,7 @@ function setPose(pose: Pose, live: boolean, preset?: string) {
   viewer.requestRender();
   refreshPosePanel();
   window.clearTimeout(poseSaveTimer);
-  poseSaveTimer = window.setTimeout(() => { saveBuilderState(); autosave(); }, live ? 400 : 0);
+  poseSaveTimer = window.setTimeout(() => { saveBuilderState(); autosave(); updateViewBounds(); }, live ? 400 : 0);
   if (preset === 'inner') {
     const def = REGIONS.find((r) => r.id === 'forearm-inner-left');
     if (def) setTimeout(() => goTo(def), 50);
@@ -1015,6 +1032,10 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
       raycaster.setFromCamera(ndcAt(x, y), viewer.camera);
       const hit = raycaster.intersectObjects(viewer.bodyMeshes(), false)[0];
       if (hit) { viewer.zoomAt(hit.point.clone(), 0.45); return; }
+      // Double tap on empty space: the whole body again, from the side you were looking at.
+      const p = viewer.camera.position, t = viewer.controls.target;
+      viewer.viewFrom((Math.atan2(p.x - t.x, p.z - t.z) * 180) / Math.PI, heightM());
+      return;
     }
     if (measuring) { const hit = pickSurface(x, y); if (hit) measureTap(hit); return; }
     if (pickingFromScan) {
@@ -1117,6 +1138,12 @@ attachGestures(viewer.renderer.domElement, viewer.controls, {
     panel.show(selected);
     recompute(selected, false);
   },
+  onCameraZoom(factor, x, y, first) {
+    // Zoom about the skin where the pinch began: drifting fingers do not pan.
+    if (first || !pinchAnchor) pinchAnchor = freshZoomAnchor(x, y);
+    viewer.zoomAt(pinchAnchor, factor);
+  },
+  onCameraPan(dx, dy) { viewer.panBy(dx, dy); },
   onPinchEnd() {
     pinchStart = null;
     if (selected) { recompute(selected, true); commit(); revealSelected(); }
@@ -1182,6 +1209,8 @@ function positionSizeTag() {
 viewer.onAfterRender = positionSizeTag;
 
 let pinchStart: { width: number; rotation: number } | null = null;
+/** Where a two-finger camera pinch zooms to (fixed for the whole pinch). */
+let pinchAnchor: Vector3 | null = null;
 let resizeCommit = 0;
 /** Resize the selected design by a factor, live; the exact mapping and an undo step follow when it settles. */
 function resizeSelected(factor: number, settleMs = 300) {
@@ -2020,6 +2049,7 @@ try {
     const inkCentre = d.surfacePoint(surface, cu, cv, 0, display()) ?? shown(p.tri, p.point);
     return { area, spread, red, centre: inkCentre, anchor: shown(p.tri, p.point), widthCm: p.widthCm, heightCm: d.result.heightCm, id: p.id };
   },
+  cameraState: () => ({ pos: viewer.camera.position.toArray(), target: viewer.controls.target.toArray(), height: heightM() }),
   cameraDir: () => { const v = new Vector3(); viewer.camera.getWorldDirection(v); return [v.x, v.y, v.z]; },
   lookAt: (pos: number[], target: number[]) => viewer.flyTo({ position: new Vector3(pos[0], pos[1], pos[2]), target: new Vector3(target[0], target[1], target[2]) }, 1),
   /** The view as a JPEG data URL without handles, ring or overlays (a stand-in for a phone photo). */

@@ -72,6 +72,12 @@ both devices are on the same Wi-Fi.
   fingers on a phone, double-click or double-tap the body to zoom in
   there, − and + buttons, keys + and − (0 shows the whole body). Close
   enough to inspect fine lines (about 7 cm from the skin).
+- Phone navigation: one finger turns, two fingers either pinch (zoom
+  about the skin between the fingers, which stays put even when the
+  fingers drift) or drag together (pan); the app decides which in the
+  first few pixels and sticks to it. The view always turns around a point
+  on the body, tilting stops short of straight above or below, and a
+  double-tap on empty background shows the whole body again.
 - Sizing and stencil export: resize a design on the body by dragging the
   yellow corner handle, by pinching it with two fingers on a phone, or
   with Alt (Option) + scroll over it on a Mac. A tag under the design shows

@@ -92,4 +92,59 @@ await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }
 await phone.waitForTimeout(500);
 log(`phone pinch out (fingers apart): distance ${pd0.toFixed(2)} -> ${(await phone.evaluate(() => window.__app.zoomDistance())).toFixed(2)} m`);
 await phone.screenshot({ path: `${out}/zm-phone.png` });
+
+// Real fingers: the point between them drifts while pinching. Spread the
+// fingers while both slide 84 px down: the skin that was between them must
+// stay there (zoom only, no panning away).
+const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
+await phone.evaluate(() => window.__app.viewFrom(0));
+await phone.waitForTimeout(1500);
+const p2 = { x: 196, y: 330 };
+const skinP = await phone.evaluate(([x, y]) => window.__app.pickAt(x, y), [p2.x, p2.y]);
+const dA = await phone.evaluate(() => window.__app.zoomDistance());
+await touch('touchStart', [[p2.x - 20, p2.y], [p2.x + 20, p2.y]]);
+for (let i = 1; i <= 12; i++) { await touch('touchMove', [[p2.x - 20 - 7 * i, p2.y + 7 * i], [p2.x + 20 + 7 * i, p2.y + 7 * i]]); await phone.waitForTimeout(30); }
+await touch('touchEnd', []);
+await phone.waitForTimeout(700);
+const sP = await phone.evaluate((p) => window.__app.toScreen(p), skinP);
+log(`phone pinch with fingers drifting 84 px down: distance ${dA.toFixed(2)} -> ${(await phone.evaluate(() => window.__app.zoomDistance())).toFixed(2)} m; the skin that was between the fingers moved ${Math.hypot(sP.x - p2.x, sP.y - p2.y).toFixed(1)} px`);
+await phone.screenshot({ path: `${out}/zm-phone-drift.png` });
+
+// Two fingers dragging together pan, without zooming.
+const dB = await phone.evaluate(() => window.__app.zoomDistance());
+const tB = (await phone.evaluate(() => window.__app.cameraState())).target;
+await touch('touchStart', [[150, 420], [240, 420]]);
+for (let i = 1; i <= 10; i++) { await touch('touchMove', [[150 + 6 * i, 420 - 9 * i], [240 + 6 * i, 420 - 9 * i]]); await phone.waitForTimeout(30); }
+await touch('touchEnd', []);
+await phone.waitForTimeout(500);
+const tC = (await phone.evaluate(() => window.__app.cameraState())).target;
+log(`phone two-finger drag: view moved ${(Math.hypot(tC[0] - tB[0], tC[1] - tB[1], tC[2] - tB[2]) * 100).toFixed(1)} cm, zoom ${dB.toFixed(2)} -> ${(await phone.evaluate(() => window.__app.zoomDistance())).toFixed(2)} m`);
+
+// A very long pan cannot carry the view off the body.
+await touch('touchStart', [[150, 200], [240, 200]]);
+for (let i = 1; i <= 30; i++) { await touch('touchMove', [[150, 200 + 20 * i], [240, 200 + 20 * i]]); await phone.waitForTimeout(15); }
+await touch('touchEnd', []);
+await phone.waitForTimeout(500);
+const st2 = await phone.evaluate(() => window.__app.cameraState());
+log(`phone long pan down: turning point at height ${(st2.target[1] * 100).toFixed(0)} cm (body 0..${(st2.height * 100).toFixed(0)} cm), ${(Math.hypot(st2.target[0], st2.target[2]) * 100).toFixed(0)} cm from the body's axis`);
+
+// One finger turns the body; it stays in view.
+await touch('touchStart', [[196, 500]]);
+for (let i = 1; i <= 10; i++) { await touch('touchMove', [[196 + 15 * i, 500 + 4 * i]]); await phone.waitForTimeout(30); }
+await touch('touchEnd', []);
+await phone.waitForTimeout(800);
+const vis = await phone.evaluate(() => { const t = window.__app.cameraState().target; const s = window.__app.toScreen(t); const r = document.getElementById('stage').getBoundingClientRect(); return { x: s.x, y: s.y, inside: s.x > r.left && s.x < r.right && s.y > r.top && s.y < r.bottom }; });
+log(`phone one-finger turn: the point it turns around is on screen: ${vis.inside}`);
+await phone.screenshot({ path: `${out}/zm-phone-after.png` });
+
+// Double tap on empty space: the whole body again.
+const empty = await phone.evaluate(() => {
+  const r = document.getElementById('stage').getBoundingClientRect();
+  for (let y = r.top + 140; y < r.bottom - 60; y += 20) for (const x of [r.left + 30, r.right - 30]) if (!window.__app.pickAt(x, y)) return { x, y };
+  return null;
+});
+for (let k = 0; k < 2; k++) { await touch('touchStart', [[empty.x, empty.y]]); await touch('touchEnd', []); await phone.waitForTimeout(120); }
+await phone.waitForTimeout(1500);
+log(`phone double tap on empty space: distance ${(await phone.evaluate(() => window.__app.zoomDistance())).toFixed(2)} m (whole body)`);
+await phone.screenshot({ path: `${out}/zm-phone-reset.png` });
 await browser.close();

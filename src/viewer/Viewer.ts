@@ -5,7 +5,7 @@
 
 import {
   AmbientLight, Color, DirectionalLight, GridHelper, HemisphereLight, Mesh, Object3D,
-  PerspectiveCamera, Quaternion, Scene, Vector3, Vector4, WebGLRenderer,
+  PerspectiveCamera, Quaternion, Scene, TOUCH, Vector3, Vector4, WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { zoomTowards } from './zoom';
@@ -37,6 +37,7 @@ export class Viewer {
   private width = 1; private height = 1;
   /** Screen space covered by side or bottom panels; the view is centred in what remains. */
   private inset = { right: 0, bottom: 0 };
+  private bounds: { min: Vector3; max: Vector3 } | null = null;
   private hemi!: HemisphereLight; private key!: DirectionalLight; private fill!: DirectionalLight; private ambient!: AmbientLight;
 
   /**
@@ -69,8 +70,13 @@ export class Viewer {
     this.controls.screenSpacePanning = true;
     this.controls.minDistance = Viewer.MIN_DIST;
     this.controls.maxDistance = Viewer.MAX_DIST;
-    // Pinch on a phone zooms towards the point between the fingers.
     this.controls.zoomToCursor = true;
+    // Two fingers are handled by the app (pinch to zoom about where the
+    // fingers landed, or drag to pan; never both at once), not here.
+    this.controls.touches = { ONE: TOUCH.ROTATE, TWO: -1 as unknown as TOUCH };
+    // Never tip over the top of the head or under the feet.
+    this.controls.minPolarAngle = (10 * Math.PI) / 180;
+    this.controls.maxPolarAngle = (170 * Math.PI) / 180;
     this.controls.target.set(0, 1.0, 0);
     this.controls.addEventListener('change', () => { this.needsRender = true; });
 
@@ -129,6 +135,43 @@ export class Viewer {
     const depth = Math.max(Viewer.MIN_DIST * 1.05, anchor.clone().sub(r.camera).dot(dir));
     const target = r.camera.clone().addScaledVector(dir, depth);
     this.zoomGoal = { camera: r.camera, target };
+    // Zooming towards empty space must not carry the turning point off the body.
+    if (this.bounds) {
+      const c = target.clone().clamp(this.bounds.min, this.bounds.max), d = c.sub(target);
+      if (d.lengthSq() > 1e-12) { this.zoomGoal.target.add(d); this.zoomGoal.camera.add(d); }
+    }
+    this.needsRender = true;
+  }
+
+  /** Keep the point the view turns around within this box (the body, with a margin). */
+  setBounds(min: Vector3, max: Vector3): void {
+    this.bounds = { min: min.clone(), max: max.clone() };
+    this.clampTarget();
+  }
+
+  /** Move the camera and its target together so the target stays in the bounds. */
+  private clampTarget(): void {
+    if (!this.bounds) return;
+    const t = this.controls.target, c = t.clone().clamp(this.bounds.min, this.bounds.max);
+    if (c.distanceToSquared(t) < 1e-12) return;
+    const d = c.sub(t);
+    t.add(d); this.camera.position.add(d);
+    if (this.zoomGoal) { this.zoomGoal.target.add(d); this.zoomGoal.camera.add(d); }
+    this.needsRender = true;
+  }
+
+  /** Slide the view by a screen distance (two-finger drag): the body follows the fingers. */
+  panBy(dxPx: number, dyPx: number): void {
+    this.fly = null;
+    if (this.zoomGoal) { this.camera.position.copy(this.zoomGoal.camera); this.controls.target.copy(this.zoomGoal.target); this.zoomGoal = null; }
+    const cam = this.camera, tgt = this.controls.target;
+    cam.updateMatrixWorld();
+    const mpp = this.metresPerPixel(cam.position.distanceTo(tgt));
+    const right = new Vector3().setFromMatrixColumn(cam.matrixWorld, 0), up = new Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+    const shift = right.multiplyScalar(-dxPx * mpp).addScaledVector(up, dyPx * mpp);
+    cam.position.add(shift); tgt.add(shift);
+    this.clampTarget();
+    this.controls.update();
     this.needsRender = true;
   }
 
@@ -333,6 +376,7 @@ export class Viewer {
       this.needsRender = true;
     }
     const moved = this.controls.update();
+    if (!this.fly) this.clampTarget(); // a mouse pan (right button) stays on the body too
     if (moved || this.needsRender) {
       this.renderFrame();
       this.needsRender = false;
